@@ -32,6 +32,7 @@ export const Language: FC<HeaderProps> = ({ actions }) => {
     <Menu placement="bottom-end">
       <MenuButton
         as={IconButton}
+        aria-label="Language"
         size="sm"
         variant="outline"
         icon={<LangIcon />}

@@ -32,7 +32,7 @@ const schema = z.object({
 
 export const LogoIcon = chakra(Logo, {
   baseStyle: {
-    strokeWidth: "10px",
+    strokeWidth: "2px",
     w: 12,
     h: 12,
   },
@@ -93,17 +93,19 @@ export const Login: FC = () => {
             <VStack alignItems="center" w="full">
               <LogoIcon />
               <Text fontSize="2xl" fontWeight="semibold">
-                {t("login.loginYourAccount")}
+                Rime
               </Text>
               <Text color="gray.600" _dark={{ color: "gray.400" }}>
-                {t("login.welcomeBack")}
+                {t("rime.tagline")}
               </Text>
             </VStack>
             <Box w="full" maxW="300px" m="auto" pt="4">
               <form onSubmit={handleSubmit(login)}>
                 <VStack mt={4} rowGap={2}>
                   <FormControl>
+                    <FormLabel htmlFor="rime-username">{t("username")}</FormLabel>
                     <Input
+                      id="rime-username" autoComplete="username"
                       w="full"
                       placeholder={t("username")}
                       {...register("username")}
@@ -111,7 +113,9 @@ export const Login: FC = () => {
                     />
                   </FormControl>
                   <FormControl>
+                    <FormLabel htmlFor="rime-password">{t("password")}</FormLabel>
                     <Input
+                      id="rime-password" autoComplete="current-password"
                       w="full"
                       type="password"
                       placeholder={t("password")}

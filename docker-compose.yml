@@ -1,7 +1,8 @@
 services:
-  marzban:
-    image: gozargah/marzban:latest
-    restart: always
+  rime:
+    build: .
+    image: rime:0.2.0-rc1
+    restart: unless-stopped
     env_file: .env
     network_mode: host
     volumes:

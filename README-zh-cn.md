@@ -1,3 +1,5 @@
+> Archived upstream guide. See [Rime README](README.md) for current setup.
+
 <p align="center">
   <a href="https://github.com/gozargah/marzban" target="_blank" rel="noopener noreferrer">
     <picture>
