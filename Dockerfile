@@ -1,35 +1,17 @@
-ARG PYTHON_VERSION=3.12
+FROM node:22-bookworm-slim AS dashboard
+WORKDIR /dashboard
+COPY app/dashboard/package*.json ./
+COPY app/dashboard/chakra.config.ts ./
+RUN npm ci
+COPY app/dashboard/ ./
+RUN VITE_BASE_API=/api/ npm run build -- --outDir build --assetsDir statics --emptyOutDir \
+    && cp build/index.html build/404.html
 
-FROM python:$PYTHON_VERSION-slim AS build
-
-ENV PYTHONUNBUFFERED=1
-
+# Match the isolated lab runtime and Xray; no floating core download on build.
+FROM gozargah/marzban@sha256:8e422c21997e5d2e3fa231eeff73c0a19193c20fc02fa4958e9368abb9623b8d
 WORKDIR /code
-
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential curl unzip gcc python3-dev libpq-dev \
-    && curl -L https://github.com/Gozargah/Marzban-scripts/raw/master/install_latest_xray.sh | bash \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY ./requirements.txt /code/
-RUN python3 -m pip install --upgrade pip setuptools \
-    && pip install --no-cache-dir --upgrade -r /code/requirements.txt
-
-FROM python:$PYTHON_VERSION-slim
-
-ENV PYTHON_LIB_PATH=/usr/local/lib/python${PYTHON_VERSION%.*}/site-packages
-WORKDIR /code
-
-RUN rm -rf $PYTHON_LIB_PATH/*
-
-COPY --from=build $PYTHON_LIB_PATH $PYTHON_LIB_PATH
-COPY --from=build /usr/local/bin /usr/local/bin
-COPY --from=build /usr/local/share/xray /usr/local/share/xray
-
+COPY requirements.txt requirements-panel.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
 COPY . /code
-
-RUN ln -s /code/marzban-cli.py /usr/bin/marzban-cli \
-    && chmod +x /usr/bin/marzban-cli \
-    && marzban-cli completion install --shell bash
-
-CMD ["bash", "-c", "alembic upgrade head; python main.py"]
+COPY --from=dashboard /dashboard/build /code/app/dashboard/build
+CMD ["bash", "-c", "alembic upgrade head && exec python main.py"]

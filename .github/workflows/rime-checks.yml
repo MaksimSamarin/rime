@@ -1,0 +1,59 @@
+name: Rime checks
+on:
+  push:
+    branches: ['feat/**', 'rime/**']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  accounting:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements-panel.txt
+      - run: python -m unittest discover -s tests -p 'test_*.py' -v
+      - run: python -m compileall -q hy2bridge app main.py panel_entry.py
+  dashboard:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app/dashboard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: app/dashboard/package-lock.json
+      - run: npm ci
+      - run: npm run build -- --outDir build --assetsDir statics
+        env:
+          VITE_BASE_API: /api/
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build --tag rime:check .
+      - name: Start an isolated fresh database
+        run: docker run -d --name rime-ci --network none -e SQLALCHEMY_DATABASE_URL=sqlite:////tmp/rime.db rime:check
+      - name: Check migrations and branded pages
+        run: |
+          docker exec rime-ci python -c '
+          import time, urllib.request
+          http=urllib.request.build_opener(urllib.request.ProxyHandler({}))
+          for attempt in range(60):
+              try:
+                  assert b"Rime" in http.open("http://127.0.0.1:8000/fleet",timeout=2).read()
+                  assert b"Rime" in http.open("http://127.0.0.1:8000/dashboard/",timeout=2).read()
+                  print("Fresh database and Rime pages are ready")
+                  break
+              except Exception:
+                  if attempt==59: raise
+                  time.sleep(1)
+          '
+      - if: failure()
+        run: docker logs rime-ci

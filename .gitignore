@@ -149,6 +149,17 @@ cython_debug/
 .idea/
 
 .env
+*.env
+*.pem
+*.key
+*.p12
+*.pfx
+*.sqlite3*
+*.tar.gz
+backups/
+research/
+fleet-config.json
+node-config.json
 v2ray-core
 xray-core
 

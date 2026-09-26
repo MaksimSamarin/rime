@@ -10,10 +10,10 @@ alembic==1.14.0
 anyio==4.2.0
 bcrypt==4.0.1
 certifi==2024.07.04
-cffi==1.17.1
+cffi==2.1.1
 click==8.1.7
 commentjson==0.9.0
-cryptography==43.0.1
+cryptography==43.0.3
 fastapi==0.115.2
 grpcio-tools==1.67.1
 grpcio==1.67.1
@@ -41,3 +41,5 @@ urllib3==1.26.19
 uvicorn==0.27.0.post1
 websocket-client==1.7.0
 websockets==12.0
+
+-r requirements-panel.txt

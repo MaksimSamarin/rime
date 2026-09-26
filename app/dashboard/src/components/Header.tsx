@@ -100,7 +100,7 @@ export const Header: FC<HeaderProps> = ({ actions }) => {
   const { t } = useTranslation();
   const { colorMode, toggleColorMode } = useColorMode();
   const [showDonationNotif, setShowDonationNotif] = useState(
-    shouldShowDonation()
+    false
   );
   const gBtnColor = colorMode === "dark" ? "dark_dimmed" : colorMode;
 
@@ -120,8 +120,8 @@ export const Header: FC<HeaderProps> = ({ actions }) => {
       }}
       position="relative"
     >
-      <Text as="h1" fontWeight="semibold" fontSize="2xl">
-        {t("users")}
+      <Text as="h1" fontWeight="semibold" fontSize="2xl" flexShrink={0}>
+        Rime <Text as="span" fontWeight="normal" fontSize="sm" color="gray.400">/ {t("users")}</Text>
       </Text>
       {showDonationNotif && (
         <NotificationCircle top="0" right="0" zIndex={9999} />
@@ -131,6 +131,7 @@ export const Header: FC<HeaderProps> = ({ actions }) => {
           <Menu>
             <MenuButton
               as={IconButton}
+              aria-label="Rime menu"
               size="sm"
               variant="outline"
               icon={
@@ -141,6 +142,7 @@ export const Header: FC<HeaderProps> = ({ actions }) => {
               position="relative"
             ></MenuButton>
             <MenuList minW="170px" zIndex={99999} className="menuList">
+              {isSudo() && <MenuItem as="a" href="/fleet" icon={<NodesUsageIcon />}>{t("rime.infrastructure")}</MenuItem>}
               {isSudo() && (
                 <>
                   <MenuItem
@@ -185,7 +187,7 @@ export const Header: FC<HeaderProps> = ({ actions }) => {
                   position="relative"
                   onClick={handleOnClose}
                 >
-                  {t("header.donation")}{" "}
+                  {t("rime.about")}{" "}
                   {showDonationNotif && (
                     <NotificationCircle top="3" right="2" />
                   )}
@@ -228,7 +230,7 @@ export const Header: FC<HeaderProps> = ({ actions }) => {
 
           <Box
             css={{ direction: "ltr" }}
-            display="flex"
+            display={{ base: "none", md: "flex" }}
             alignItems="center"
             pr="2"
             __css={{
@@ -242,7 +244,7 @@ export const Header: FC<HeaderProps> = ({ actions }) => {
               data-color-scheme={`no-preference: ${gBtnColor}; light: ${gBtnColor}; dark: ${gBtnColor};`}
               data-size="large"
               data-show-count="true"
-              aria-label="Star Marzban on GitHub"
+              aria-label="Star Rime on GitHub"
             >
               Star
             </GitHubButton>

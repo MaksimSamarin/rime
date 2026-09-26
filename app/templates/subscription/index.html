@@ -2,7 +2,9 @@
 <html>
 
 <head>
-    <title>Subscription Information</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="icon" href="/statics/favicon/rime.svg" type="image/svg+xml">
+    <title>Rime — Subscription</title>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -68,13 +70,23 @@
             margin-bottom: 5px;
             margin-right: -15px;
         }
+    body { background:#0b1018; color:#e8eef5; font-family:system-ui,sans-serif; max-width:880px; margin:40px auto; line-height:1.6; }
+        .rime-brand { display:flex; flex-wrap:wrap; gap:18px; align-items:center; border-bottom:1px solid #293747; padding-bottom:24px; margin-bottom:32px; }
+        .rime-brand strong { font-size:36px; letter-spacing:-1px; color:#7dd3fc; }
+        .rime-brand span { color:#a8b8cb; }
+        h1 { font-size:26px; } ul { list-style:none; padding:0; } li { display:flex; flex-wrap:wrap; gap:8px; margin:14px 0; }
+        input { flex:1; min-width:120px; background:#111923; color:#e8eef5; border:1px solid #405167; padding:12px; border-radius:8px; }
+        button { min-height:44px; border:0; border-radius:8px; padding:10px 16px; background:#7dd3fc; color:#082f49; font-weight:600; cursor:pointer; }
+        button:focus-visible,input:focus-visible { outline:2px solid #7dd3fc; outline-offset:3px; }
+        .qr-popup { color:#111923; max-width:calc(100vw - 72px); } .active { background:#166534; } .limited { background:#991b1b; } .expired { background:#854d0e; } .disabled { background:#374151; }
     </style>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 </head>
 
 <body>
-    <h1>User Information</h1>
-    <p>Username: {{ user.username }}</p>
+    <header class="rime-brand"><strong>Rime</strong><span>VPN infrastructure management</span></header>
+    <h1>Your subscription</h1>
+    <p>Username: {{ user.username | e }}</p>
     <p>Status: <span
             class="status {% if user.status.value == 'active' %}active{% elif user.status.value == 'limited' %}limited{% elif user.status.value == 'expired' %}expired{% elif user.status.value == 'disabled' %}disabled{% endif %}">{{
             user.status.value }}</span></p>
@@ -96,9 +108,9 @@
     <ul>
         {% for link in user.links %}
         <li>
-            <input type="text" value="{{ link }}" readonly>
-            <button class="copy-button" onclick="copyLink('{{ link }}', this)">Copy</button>
-            <button class="qr-button" data-link="{{ link }}">QR Code</button>
+            <input type="text" value="{{ link | e }}" readonly aria-label="Connection link">
+            <button class="copy-button" onclick="copyLink(this.previousElementSibling.value, this)">Copy</button>
+            <button class="qr-button" data-link="{{ link | e }}">QR Code</button>
         </li>
         {% endfor %}
     </ul>

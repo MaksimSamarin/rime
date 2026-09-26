@@ -1,5 +1,6 @@
 import { extendTheme } from "@chakra-ui/react";
 export const theme = extendTheme({
+  config: { initialColorMode: "dark", useSystemColorMode: false },
   shadows: { outline: "0 0 0 2px var(--chakra-colors-primary-200)" },
   fonts: {
     body: `Inter,-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Oxygen,Ubuntu,Cantarell,Fira Sans,Droid Sans,Helvetica Neue,sans-serif`,
@@ -7,19 +8,21 @@ export const theme = extendTheme({
   colors: {
     "light-border": "#d2d2d4",
     primary: {
-      50: "#9cb7f2",
-      100: "#88a9ef",
-      200: "#749aec",
-      300: "#618ce9",
-      400: "#4d7de7",
-      500: "#396fe4",
-      600: "#3364cd",
-      700: "#2e59b6",
-      800: "#284ea0",
-      900: "#224389",
+      50: "#f0f9ff",
+      100: "#e0f2fe",
+      200: "#bae6fd",
+      300: "#7dd3fc",
+      400: "#38bdf8",
+      500: "#0284c7",
+      600: "#0369a1",
+      700: "#075985",
+      800: "#0c4a6e",
+      900: "#082f49",
     },
     gray: {
-      750: "#222C3B",
+      750: "#172332",
+      800: "#111923",
+      900: "#0b1018",
     },
   },
   components: {

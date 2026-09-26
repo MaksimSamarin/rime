@@ -14,6 +14,15 @@ Dockerfile*
 __pycache__
 db.sqlite3
 db.sqlite3-journal
+*.sqlite3*
+*.pem
+*.key
+*.tar.gz
+backups
+research
+tests
+fleet-config.json
+node-config.json
 docker-compose*.yml
 v2ray-core
 venv
