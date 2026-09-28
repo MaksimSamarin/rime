@@ -10,6 +10,12 @@ Infrastructure requires a sudo admin. Tokens are never passed in URLs.
 Run `alembic upgrade head` followed by `python main.py`. The Docker entry point
 uses `&&` so failed migrations prevent startup.
 
+The console is served directly from `hy2bridge/web`; no frontend build is needed.
+`install_service.sh` creates `rime.service` by default. Set `SERVICE_NAME=marzban`
+explicitly only when maintaining that existing unit name. The script writes the
+unit and reloads systemd; it does not enable, start or migrate running services.
+The `rime-cli.py` and legacy `marzban-cli.py` entry points share the same commands.
+
 `RIME_FLEET_CONFIG` points to a mode-600 JSON file; `HY2_PANEL_CONFIG` is a legacy
 alias. Without either, reporting starts with no Hy2 credentials or SSH targets.
 Configuration changes require restart. Minimal config:

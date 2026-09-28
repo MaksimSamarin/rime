@@ -1,9 +1,13 @@
-# CLI
+# Rime CLI
+
+Run from the repository root, or inside the `rime` Compose service.
+The `marzban-cli.py` entry point and `MARZBAN_ADMIN_PASSWORD` variable remain
+compatibility aliases for existing installations.
 
 **Usage**:
 
 ```console
-$ [OPTIONS] COMMAND [ARGS]...
+$ python rime-cli.py [OPTIONS] COMMAND [ARGS]...
 ```
 
 **Options**:

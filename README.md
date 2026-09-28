@@ -1,76 +1,86 @@
 # Rime
 
-**VPN infrastructure management**
+**VPN infrastructure management for VLESS and Hysteria2.**
 
-VLESS + Hysteria2, shared traffic accounting and quotas, monitoring, reports and
-SSH node deployment. Rime is a fork of Marzban **0.8.4**.
+[English](README.md) · [Русский](README-ru.md)
 
-![Rime](docs/brand/rime.svg)
+Manage users, subscriptions, traffic and server resources in one console.
+Rime brings node access policies, quotas, incident handling and SSH deployment
+into the same workspace while preserving existing subscription identities.
 
-**0.2.0-rc6: release candidate for isolated testing and a controlled pilot.**
-Controlled production rollout and rollback rehearsals have been completed.
-Each installation still requires its own backup, compatibility checks and pilot.
+![Rime overview with synthetic demonstration data](docs/screenshots/overview.png)
 
-## Features
+*Actual Rime interface with synthetic data. No production users, addresses,
+subscription credentials or server configurations appear in these screenshots.*
 
-- Shared user traffic and quotas across Xray and Hysteria2.
-- Per-node traffic allowances, scheduled resets and warning/stop-access modes.
-- Durable Hy2 journals, retry-safe accounting, drained sessions before resets.
-- Unified console, user tags and all-node or selected-node access.
-- Filtered hourly reports, CSV, node monitoring/history and incident workflow.
-- SSH deployment wizard with preflight, fingerprint checks and rollback.
-- Rime identity on login, dashboard, infrastructure, subscription pages and icons.
-- Existing subscription routes and user identities retained.
+## One console
 
-## Run
-
-Use Linux/Docker. Copy `.env.example` to `.env` and configure an isolated data
-location before running `docker compose build` and `docker compose up -d`.
-The Compose file preserves the upstream `/var/lib/marzban` mount for migration
-compatibility; change its host side to an empty test directory for a fresh lab.
-Never start a test instance over production data.
-
-The launcher retains upstream TLS/loopback behavior. Configure HTTPS for public
-access. Create an admin with `marzban-cli admin create --sudo` (compatibility name).
-
-| Area | Path |
+| Users and access | Fleet resources |
 |---|---|
-| Unified console: users, reports, monitoring, nodes | `/fleet` |
-| Compatibility redirect to Users | `/dashboard/` |
-| API docs, if enabled | `/docs` |
+| [![Users, tags and quotas](docs/screenshots/users.png)](docs/screenshots/users.png) | [![CPU, RAM and disk across the fleet](docs/screenshots/monitoring.png)](docs/screenshots/monitoring.png) |
+| Traffic reports | Nodes |
+| [![Traffic by protocol, node and user group](docs/screenshots/traffic.png)](docs/screenshots/traffic.png) | [![Node inventory](docs/screenshots/nodes.png)](docs/screenshots/nodes.png) |
 
-The console uses one login session and requires a sudo admin. Set `RIME_FLEET_CONFIG` to
-a private JSON file for Hy2 and provisioning; `HY2_PANEL_CONFIG` remains an alias.
+[View the screenshot gallery and reproduction steps](docs/SCREENSHOTS.md).
 
-Read [console workflow](docs/CONSOLE.md), [operations/migration](docs/OPERATIONS.md), [node quotas](docs/NODE_QUOTAS.md), [testing](docs/TESTING.md),
-[brand guidelines](docs/brand/README.md), and [attribution](NOTICE.md).
+- **Users:** create and edit accounts, group them with tags, set limits and choose
+  all nodes or a specific set. Previously issued subscription URLs remain valid.
+- **Traffic:** shared Xray/Hy2 reports, hourly history, user/tag/node filters and CSV.
+- **Monitoring:** CPU, memory, disk, availability history and protocol-specific
+  connection details, with the panel host shown separately.
+- **Operations:** node quotas, incident acknowledgement and diagnostics, controlled
+  SSH deployment, and removal with a precise preview of affected panel data.
 
-## Limits
+## Run an isolated instance
 
-SQLite and one controller process only. New nodes require Docker and supplied TLS
-certificates. No ACME, MySQL or multiworker mode. Quotas are polled and can
-overshoot. Hy2 accounts accepted payload rather than confirmed delivery.
-New Hy2 links support v2ray/link-list subscriptions, not every client format.
+Rime **0.2.0-rc6** is a release candidate. Controlled rollout and rollback
+rehearsals have passed; qualify your own installation before switching traffic.
+Use Linux, Docker Compose, SQLite and one panel process.
 
-Keep existing domains, subscription paths, signing keys, dates, UUIDs, ports and
-site-specific subscription additions. Restarting cores can reconnect clients.
-Restore panel and node journals from a consistent checkpoint.
+```sh
+cp .env.example .env
+# Configure .env and an empty host-side data directory in docker-compose.yml.
+docker compose build
+docker compose up -d
+docker compose exec rime python rime-cli.py admin create --sudo
+```
 
-## Development
+The default host mount `/var/lib/marzban` is retained for migration compatibility.
+Change its host side to an empty directory for a new test instance. Configure
+HTTPS before public access. The existing TLS/loopback behavior is preserved.
 
-Use feature branches and PRs against this fork. `Rime checks` builds the UI and
-runs accounting/operations tests. Upstream release workflows are gated to the
-upstream repository; no automatic deployment or image publication is configured.
-`core-patches/` targets Hysteria app/v2.12.3. Keep core and agent versions together.
-Private credentials, configs, backups and deployment inventories are excluded.
+Open **`/fleet`**. Existing `/dashboard/` links redirect to the Users page;
+there is no second dashboard or frontend build. The console requires a sudo
+administrator. API permissions and existing subscription routes are unchanged.
 
-## Credits
+Set `RIME_FLEET_CONFIG` to a private configuration file for agents and provisioning.
+`HY2_PANEL_CONFIG` and the old CLI entry point remain compatibility aliases.
 
-Built on [Marzban](https://github.com/Gozargah/Marzban),
-[Xray](https://github.com/XTLS/Xray-core) and
-[Hysteria](https://github.com/apernet/hysteria).
-The AGPL-3.0 [LICENSE](LICENSE), notices and upstream history are retained.
-Rime Input Method Engine is an unrelated existing project.
+## Documentation
 
-Original [upstream documentation](docs/upstream/README.md) and translated guides
-are historical; their installation commands install Marzban, not Rime.
+- [Console and user access](docs/CONSOLE.md)
+- [Operations and migration](docs/OPERATIONS.md)
+- [Node quotas](docs/NODE_QUOTAS.md) and [node lifecycle](docs/NODE_LIFECYCLE.md)
+- [Resource observers](docs/RESOURCE_OBSERVERS.md) and [traffic semantics](docs/TRAFFIC_AND_CONNECTIONS.md)
+- [CLI](cli/README.md), [testing](docs/TESTING.md) and [contributing](CONTRIBUTING.md)
+
+## Current limits
+
+No MySQL or multiple controller workers. Provisioning needs an allowed SSH target,
+Docker, configured templates/bundles and supplied TLS certificates; it does not
+purchase servers or issue certificates. Legacy Hy2 observers provide monitoring
+and metering; safe resets and enforcement require the corresponding agent/core
+capabilities. Polling quotas can overshoot. Historical data cannot be reconstructed.
+New Hy2 links support link-list subscriptions, not every client format.
+
+Keep domains, ports, signing material, UUIDs and consistent backups when migrating.
+Node deletion in the panel does not erase a remote VPS, DNS or backup archives.
+
+## Project and attribution
+
+Rime is based on [Marzban 0.8.4](https://github.com/Gozargah/Marzban),
+[Xray](https://github.com/XTLS/Xray-core) and [Hysteria](https://github.com/apernet/hysteria).
+The original [AGPL-3.0 license](LICENSE), notices and history are preserved.
+See [attribution](NOTICE.md) and [upstream provenance](docs/upstream/README.md).
+Compatibility names are documented; they are not a separate UI or endorsement.
+Rime Input Method Engine is an unrelated project.

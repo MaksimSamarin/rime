@@ -1,8 +1,8 @@
 #!/bin/bash
 
-SERVICE_NAME="marzban"
-SERVICE_DESCRIPTION="Marzban Service"
-SERVICE_DOCUMENTATION="https://github.com/gozargah/marzban"
+SERVICE_NAME="${SERVICE_NAME:-rime}"
+SERVICE_DESCRIPTION="Rime VPN management"
+SERVICE_DOCUMENTATION="https://github.com/MaksimSamarin/rime"
 MAIN_PY_PATH="$PWD/main.py"
 SERVICE_FILE="/etc/systemd/system/$SERVICE_NAME.service"
 

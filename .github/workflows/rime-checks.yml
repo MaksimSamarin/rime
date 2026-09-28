@@ -17,24 +17,15 @@ jobs:
       - run: pip install -r requirements-panel.txt -c requirements.lock
       - run: python -m unittest discover -s tests -p 'test_*.py' -v
       - run: python -m compileall -q hy2bridge app main.py panel_entry.py
-  dashboard:
+  console:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: app/dashboard
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: npm
-          cache-dependency-path: app/dashboard/package-lock.json
-      - run: npm ci
-      - run: node --test ../../tests/monitoring.test.cjs
-      - run: node --check ../../hy2bridge/web/console.js && node --check ../../hy2bridge/web/app.js
-      - run: npm run build -- --outDir build --assetsDir statics
-        env:
-          VITE_BASE_API: /api/
+      - run: node --test tests/monitoring.test.cjs
+      - run: node --check hy2bridge/web/console.js && node --check hy2bridge/web/app.js && node --check hy2bridge/web/monitoring.js
   image:
     runs-on: ubuntu-latest
     steps:
@@ -42,7 +33,7 @@ jobs:
       - run: docker build --tag rime:check .
       - name: Start an isolated fresh database
         run: docker run -d --name rime-ci --network none -e SQLALCHEMY_DATABASE_URL=sqlite:////tmp/rime.db rime:check
-      - name: Check migrations and branded pages
+      - name: Check migrations, console redirects and subscription icons
         run: |
           docker exec rime-ci python -c '
           import time, urllib.request
@@ -51,6 +42,11 @@ jobs:
               try:
                   assert b"Rime" in http.open("http://127.0.0.1:8000/fleet",timeout=2).read()
                   assert b"Rime" in http.open("http://127.0.0.1:8000/dashboard/",timeout=2).read()
+                  assert b"Rime" in http.open("http://127.0.0.1:8000/dashboard/users",timeout=2).read()
+                  icon=http.open("http://127.0.0.1:8000/statics/favicon/rime.svg",timeout=2)
+                  assert icon.headers.get_content_type()=="image/svg+xml" and b"<svg" in icon.read()
+                  from pathlib import Path
+                  assert not Path("/code/app/dashboard").exists()
                   print("Fresh database and Rime pages are ready")
                   break
               except Exception:
@@ -66,5 +62,11 @@ jobs:
             -e LAB_SUITE_ROOT=/suite -e RUN_ID=console-creation \
             -e XRAY_TEST_BINARY=/usr/local/bin/xray -e PYTHONDONTWRITEBYTECODE=1 \
             --entrypoint python rime:check /tests/console_creation.py
+      - name: Verify UI compatibility routes and CLI aliases
+        run: |
+          docker run --rm --network none --cpus 1 --memory 512m --cap-drop ALL \
+            --security-opt no-new-privileges --read-only --tmpfs /tmp:rw,nosuid,size=128m \
+            -v "${PWD}/tests:/tests:ro" -e PYTHONDONTWRITEBYTECODE=1 \
+            --entrypoint python rime:check /tests/ui_routes.py
       - if: failure()
         run: docker logs rime-ci

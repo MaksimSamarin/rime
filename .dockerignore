@@ -27,3 +27,5 @@ docker-compose*.yml
 v2ray-core
 venv
 xray-core
+app/dashboard
+docs/screenshots
