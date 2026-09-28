@@ -21,12 +21,13 @@ Steps to reproduce the behavior:
 A clear and concise description of what you expected to happen.
 
 **Screenshots**
-If applicable, add screenshots to help explain your problem.
+If applicable, add screenshots with synthetic or redacted data. Do not include
+subscription URLs, credentials, private keys, environment files or databases.
 
 **Machine details (please complete the following information):**
- - OS: [e.g. ubuntu 20]
-- Python version: [e.g 3.8]
-- Nodejs version: [e.g 16.17]
+- OS: [e.g. Ubuntu 24.04]
+- Rime version:
+- Python / Xray / Hysteria versions:
 - Browser [e.g. chrome, safari]
 
 **Additional context**

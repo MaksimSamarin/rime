@@ -12,13 +12,14 @@ Fast checks from the repository root:
 ```sh
 python -m pip install -r requirements-panel.txt
 python -m unittest discover -s tests -p 'test_*.py' -v
-cd app/dashboard
-npm ci
-VITE_BASE_API=/api/ npm run build -- --outDir build --assetsDir statics
+node --test tests/monitoring.test.cjs
+node --check hy2bridge/web/app.js
+node --check hy2bridge/web/console.js
+node --check hy2bridge/web/monitoring.js
 ```
 
 The transport test uses Linux socket/TLS behavior and is skipped on Windows.
-`Rime checks` runs both Python and TypeScript builds on Linux. CI does not deploy,
+`Rime checks` runs Python and console JavaScript checks on Linux. CI does not deploy,
 connect to SSH targets or publish images. Image builds are local until release.
 
 The image job also runs `tests/console_creation.py` in its newly built image with
@@ -26,6 +27,10 @@ no external network, a temporary database and synthetic accounts. It verifies
 VLESS inbound defaults, external Hy2 links, real VLESS payload, selected-node
 filtering, disabled creation, editing and previously issued URLs after restart.
 This regression harness does not require separate Hy2 binaries or lab certificates.
+
+`tests/ui_routes.py` checks the default and custom legacy dashboard redirects,
+subscription icons, the API, both CLI entry points and the absence of the retired
+frontend. It also runs in the isolated image job with a temporary database.
 
 Node-quota regression tests are in `tests/test_node_quotas.py`. The isolated E2E
 harness additionally supports `NODE_QUOTAS=1`: Hy2/VLESS node-wide enforcement,

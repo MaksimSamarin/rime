@@ -1,68 +1,43 @@
-# Contribute to Marzban
-Thanks for considering contributing to Marzban!
+# Contributing to Rime
 
-## Questions
+Open issues and pull requests in [this fork](https://github.com/MaksimSamarin/rime).
+Use a feature branch from `master`. Describe the concrete problem, resulting
+behavior, relevant tests and any migration or rollback limits.
 
-Please don't ask your questions in issues. Instead, use one of the following ways to ask:
-- Ask on our telegram group: [@Gozargah_Marzban](https://t.me/gozargah_marzban)
-- Ask on our [GitHub Discussions](https://github.com/gozargah/marzban/discussions) for long term discussion or larger questions.
+## Project layout
 
+| Path | Purpose |
+|---|---|
+| `app/` | FastAPI backend, models, migrations and compatibility routes |
+| `hy2bridge/` | Fleet accounting, node agents, monitoring and management |
+| `hy2bridge/web/` | The single Rime console: HTML, CSS and JavaScript |
+| `cli/`, `rime-cli.py` | Administrative CLI; old entry point remains an alias |
+| `xray_api/`, `core-patches/` | Xray client and qualified Hy2 changes |
+| `tests/` | Unit and isolated transport/console regression tests |
+| `docs/` | Operations, capabilities, limits and synthetic UI screenshots |
 
-## Reporting issues
+## Development and testing
 
-Include the following information in your post:
-- Describe what you expected to happen.
-- Describe what actually happened. Include server logs or any error that browser shows.
-- If possible, post your xray json config file and what you have set in env (by censoring critical information).
-- Also tell the version of Marzban, Xray and docker (if you use docker) you are using.
+The console is served directly by FastAPI. It needs no React, Vite or npm build.
+Node.js is used for syntax checks and the JavaScript test runner only.
+Changes to static files are available on refresh; `DEBUG=true` enables backend
+reload for isolated development. Never enable a development server against a
+production database.
 
+Follow [TESTING.md](docs/TESTING.md). Keep changes focused, preserve existing
+subscriptions and credentials, and verify changes to accounting or node control
+with the isolated real-core harness. Run one controller per SQLite database.
+Database and node journal backups must be consistent before migration.
 
-# Submitting a Pull Request
-If there is not an open issue for what you want to submit, prefer opening one for discussion before working on a PR. You can work on any issue that doesn't have an open PR linked to it or a maintainer assigned to it. These show up in the sidebar. No need to ask if you can work on an issue that interests you.
+## Reports and screenshots
 
-## Branches
-When starting development on this project, please make sure to create a new branch off the `dev` branch. This helps to keep the `master` branch stable and free of any development work that may not be complete or fully tested.
+Include the Rime/core versions, a reproducible scenario and sanitized diagnostics.
+Do not attach environment files, private keys, subscription URLs, database copies
+or full server inventories. Use [synthetic fixtures](docs/SCREENSHOTS.md) for public
+screenshots. State when a result is simulated rather than a live network probe.
 
-## Project Structure
-```
-.
-├── app                      # Backend code (FastAPI - Python)
-│   └── dashboard            # Frontend code (React - Typescript)
-├── cli                      # CLI code (Typer - Python)
-└── xray_api                 # Client of Xray's gRPC API
-```
+## CLI and compatibility
 
-## Backend
-Backend is built using FastAPI and uses SQLAlchemy as the ORM for database operations. All Pydantic models can be found in the `app/models` directory, while all database-related operations and models are in the `app/db` directory. The migration scripts for the database (Alembic) can be found in the `app/db/migrations` directory.
-
-### Python Code Formatting
-To maintain consistency in the codebase, we require all code to be formatted using 
-```bash
-autopep8 <file> --max-line-length 120
-```
-
-## Frontend
-Frontend is pre-built and served by FastAPI from the `app/dashboard/build` directory. To rebuild the frontend, first make sure you have the necessary dependencies installed by running `npm install` in the `app/dashboard` directory. Then, simply remove the `app/dashboard/build` directory and run the Python code again, and it will rebuild the frontend automatically.
-
-### Components Library
-Frontend uses `Chakra-UI` as the component library, so please adhere to the Chakra-UI approach when contributing. Strive to create components that are cohesive and serve a single purpose. Keep in mind that readability and maintainability are more important than brevity, so prioritize those factors when writing your code.
-
-## Marzban CLI
-Marzban CLI is built using [Typer](https://typer.tiangolo.com/), and its commands' code can be found in `cli`  directory. Its documentation is generated using [Typer CLI](https://typer.tiangolo.com/typer-cli/) which can be re-generated by navigating to project's root directory and running the following command (`typer-cli` package needs to be installed first):
-
-```bash
-$ PYTHONPATH=$(pwd) typer marzban-cli.py utils docs --name "" --output ./cli/README.md
-```
-
-## Debug Mode
-To run the project in debug mode with auto-reload, you can set the environment variable `DEBUG` to `true`. then by running the `main.py`, the backend and frontend will run separately on different ports.
-
-Note that you must first install the necessary npm packages by running npm install inside the app/dashboard directory before running in debug mode.
-```bash
-cd app/dashboard
-npm install
-cd ../..
-```
-
-If you run the project with debug mode off and delete the `app/dashboard/build` directory, the frontend will be rebuilt automatically on the next run. However, no rebuild will occur while inside debug mode."
-
+Run `python rime-cli.py --help` from the repository root. CLI commands live in
+`cli/` and use Typer. The old script name and environment variables remain aliases.
+Keep the original license and notices; see [NOTICE.md](NOTICE.md).

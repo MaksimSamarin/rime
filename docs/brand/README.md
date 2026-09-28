@@ -17,8 +17,12 @@ Use the same mark on login, browser icons, infrastructure and subscription pages
 Use local system sans-serif fonts, tabular numbers, 44 px touch targets and visible
 keyboard focus. Color must not be the only status indicator. Respect reduced
 motion and browser zoom. Operational screens prioritize tables and legibility
-over oversized headings suggested by the generic design-system search.
+and clear labels for operational data.
 
 The name is not unique: Rime Input Method Engine is an unrelated existing project.
 Always include the VPN description in repository metadata and introductory copy.
 This is not a trademark clearance claim.
+
+Current console assets live in `hy2bridge/web`; browser/subscription icon aliases
+are served from `hy2bridge/web/icons`. Public UI captures use only the synthetic
+fixture described in [SCREENSHOTS.md](../SCREENSHOTS.md).

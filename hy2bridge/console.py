@@ -5,7 +5,6 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Literal
 
 from fastapi import BackgroundTasks, Depends, HTTPException, Query
-from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 
@@ -55,7 +54,6 @@ def install(app,store,operations,access):
     from app.models.admin import Admin
     from app.models.user import UserCreate,UserModify,UserResponse,NextPlanModel
     from app.models.node import NodeModify,NodeStatus
-    from config import DASHBOARD_PATH
 
     with store.connection(write=True) as db:
         db.execute('''CREATE TABLE IF NOT EXISTS fleet_event_actions(
@@ -64,13 +62,6 @@ def install(app,store,operations,access):
         db.execute('''CREATE TABLE IF NOT EXISTS fleet_health_history(
             node TEXT NOT NULL,minute INTEGER NOT NULL,state TEXT NOT NULL,metrics TEXT NOT NULL,
             PRIMARY KEY(node,minute))''')
-
-    @app.middleware('http')
-    async def unified_dashboard(request,call_next):
-        path=request.url.path.rstrip('/');dashboard=DASHBOARD_PATH.rstrip('/')
-        if path==dashboard or path.startswith(dashboard+'/'):
-            return RedirectResponse('/fleet#users',status_code=307)
-        return await call_next(request)
 
     def sample():
         minute=int(time.time())//60*60

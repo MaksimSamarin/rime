@@ -162,6 +162,9 @@ fleet-config.json
 node-config.json
 v2ray-core
 xray-core
+**/node_modules/
+# Retired frontend caches left in existing working directories.
+app/dashboard/
 
 # don't track custom/dev.json/yaml/yml configs, such as xray-custom.json or clash-dev.yaml
 *-custom.json
