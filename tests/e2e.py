@@ -28,9 +28,10 @@ BASE='http://127.0.0.1:18800'
 A='11111111-1111-4111-8111-111111111111'
 B='22222222-2222-4222-8222-222222222222'
 TOKEN='synthetic-node-token-0000000000000001'
+XRAY_BINARY=os.environ.get('XRAY_TEST_BINARY','/lab/bin/xray')
 ENV=dict(os.environ, PYTHONPATH=str(ROOT/'source')+':/code',
     SQLALCHEMY_DATABASE_URL='sqlite:///'+str(STATE/'db.sqlite3'),
-    XRAY_JSON=str(STATE/'xray.json'),XRAY_EXECUTABLE_PATH='/lab/bin/xray',
+    XRAY_JSON=str(STATE/'xray.json'),XRAY_EXECUTABLE_PATH=XRAY_BINARY,
     SUDO_USERNAME='labadmin',SUDO_PASSWORD='Synthetic-lab-password-2026',
     UVICORN_HOST='127.0.0.1',UVICORN_PORT='18800',
     JOB_RECORD_USER_USAGES_INTERVAL='1',JOB_REVIEW_USERS_INTERVAL='1',
@@ -153,7 +154,8 @@ def node(n):
         'node_token':TOKEN if n==1 else TOKEN[:-1]+'2',
         'stats_url':f'http://127.0.0.1:{19999-n}','stats_secret':'synthetic-stats-secret',
         'auth_port':18887+n,'spool':str(STATE/f'spool{n}.db'),'pid_file':str(STATE/f'hy{n}.pid'),
-        'interval':.25,'policy_ttl':2,'durable':bool(os.environ.get('DURABLE_CORE')),'heartbeat_interval':1})
+        'interval':.25,'policy_ttl':2,'durable':bool(os.environ.get('DURABLE_CORE')),'heartbeat_interval':1,
+        'traffic_probe':{'host':'127.0.0.1','port':18101 if n==1 else 18103,'bytes':2048}})
     agent=start(f'agent{n}',[sys.executable,'-m','hy2bridge.node','--config',cfg])
     wait(lambda:request(f'http://127.0.0.1:{18887+n}/health')['fresh'])
     return proc,agent
@@ -193,12 +195,25 @@ def main():
         except urllib.error.HTTPError as e:denied=e.code in (401,403)
         check('scoped_token_denied_'+path.rsplit('/',1)[-1],denied)
     hy1,ag1=node(1);hy2,ag2=node(2)
+    clients={}
     for name,auth,server,port in [('a1',A,14443,18101),('a2',A,14443,18102),('a3',A,14444,18103),('b1',B,14443,18104)]:
-        hyclient(name,auth,server,port)
+        clients[name]=hyclient(name,auth,server,port)
     wait(lambda:fresh(18104))
     a1,a2,a3,b=conn(18101),conn(18102),conn(18103),conn(18104)
     check('hy2_multi_node_multi_device_tcp',all(echo(s) for s in [a1,a2,a3,b]))
     check('hy2_udp',udp(18201) and udp(18204))
+    probe=request('/api/fleet/nodes/node1/checks',{},token=admin)
+    passed=wait(lambda:next((c for c in request('/api/fleet/nodes/node1',token=admin)['checks'] if c['id']==probe['id'] and c['state']=='passed'),None))
+    check('vpn_payload_probe_passes_through_real_hy2_client',passed['result']['bytes']==2048)
+    a1.close();stop(clients['a1']);wait(lambda:not fresh(18101))
+    failed_probe=request('/api/fleet/nodes/node1/checks',{},token=admin)
+    failed=wait(lambda:next((c for c in request('/api/fleet/nodes/node1',token=admin)['checks'] if c['id']==failed_probe['id'] and c['state']=='failed'),None))
+    check('broken_vpn_payload_probe_opens_event',failed['result']['stage']=='payload' and any(e['code']=='traffic_failed' and not e['resolved_at'] for e in request('/api/fleet/events',token=admin)))
+    clients['a1']=hyclient('a1-restored',A,14443,18101);wait(lambda:fresh(18101))
+    recovery=request('/api/fleet/nodes/node1/checks',{},token=admin)
+    wait(lambda:next((c for c in request('/api/fleet/nodes/node1',token=admin)['checks'] if c['id']==recovery['id'] and c['state']=='passed'),None))
+    check('successful_payload_recheck_resolves_event',any(e['code']=='traffic_failed' and e['resolved_at'] for e in request('/api/fleet/events',token=admin)))
+    a1=conn(18101)
     wait(lambda:request('/api/user/alice',token=admin)['used_traffic']>=7168)
     report=request('/api/hy2/report',token=admin)
     check('hy2_usage_in_panel_and_per_node_report',{'node1','node2'} <= {r['node'] for r in report['usage']})
@@ -226,16 +241,101 @@ def main():
         'protocol':'dokodemo-door','settings':{'address':'127.0.0.1','port':18080,'network':'tcp'}}],
         'outbounds':[{'protocol':'vless','settings':{'vnext':[{'address':'127.0.0.1','port':16443,
             'users':[{'id':A,'encryption':'none'}]}]}}]})
-    start('vless-client',['/lab/bin/xray','run','-c',vconfig])
+    start('vless-client',[XRAY_BINARY,'run','-c',vconfig])
     wait(lambda:fresh(18110))
     wait(lambda:request('/api/user/alice',token=admin)['used_traffic']>before)
     hy_usage=sum(r['tx']+r['rx'] for r in request('/api/hy2/report',token=admin)['usage'] if r['username']=='alice')
     check('native_vless_and_hy2_combined_usage',request('/api/user/alice',token=admin)['used_traffic']>hy_usage)
-    used=request('/api/user/alice',token=admin)['used_traffic']
+    if os.environ.get('NODE_QUOTAS')=='1':
+        def set_quota(node,limit=5000,direction='total',action='stop'):
+            return request('/api/fleet/nodes/'+node+'/quota',{'limit_bytes':limit,'direction':direction,'action':action,'period':'none'},method='PUT',token=admin)
+        def node_quota(node):return request('/api/fleet/nodes/'+node,token=admin)['quota']
+        set_quota('node1')
+        check('node_quota_trigger_hy2_payload',echo(a1,8192))
+        wait(lambda:node_quota('node1')['blocked'])
+        wait(lambda:not fresh(18101) and not fresh(18104))
+        check('hy2_node_quota_blocks_all_users_only_on_selected_node',not echo(a1) and not echo(b) and fresh(18103) and fresh(18110))
+        check('node_quota_preserves_user_statuses_and_issued_subscription',request('/api/user/alice',token=admin)['status']=='active' and request('/api/user/bob',token=admin)['status']=='active' and request(oldurl)==baseline)
+        pp_before=pp;stop(pp);pp,admin=panel('node-quota-restart')
+        check('node_quota_block_survives_panel_restart',node_quota('node1')['blocked'])
+        reset=request('/api/fleet/nodes/node1/quota/reset',method='POST',token=admin)
+        check('node_quota_manual_reset_starts_zero',reset['used_bytes']==0 and not reset['blocked'])
+        wait(lambda:fresh(18101) and fresh(18104));set_quota('node1',0)
+        wait(lambda:fresh(18101) and fresh(18103) and fresh(18110),25)
+        check('node_quota_reset_restores_same_hy2_clients',fresh(18101) and fresh(18104))
+        set_quota('node1',100000)
+        with conn(18101) as quota_stream:check('scheduled_node_quota_trigger_payload',echo(quota_stream,131072))
+        wait(lambda:node_quota('node1')['blocked']);wait(lambda:not fresh(18101))
+        # Accelerate only this isolated fixture's boundary; never change OS time.
+        with sqlite3.connect(STATE/'db.sqlite3') as db:
+            generation=db.execute("SELECT generation FROM fleet_node_quotas WHERE node='node1'").fetchone()[0]
+            db.execute("UPDATE fleet_node_quotas SET period='daily',next_reset=? WHERE node='node1'",(time.time()+3,))
+        def period_advanced():
+            with sqlite3.connect(STATE/'db.sqlite3') as db:
+                return db.execute("SELECT generation FROM fleet_node_quotas WHERE node='node1'").fetchone()[0]>generation
+        wait(period_advanced,15);wait(lambda:fresh(18101),15)
+        check('scheduled_node_quota_reset_reopens_same_client',not node_quota('node1')['blocked'])
+        set_quota('node1',0)
+        set_quota('xray:local',6000,'outgoing')
+        native_socket=conn(18110);check('node_quota_trigger_vless_payload',echo(native_socket,8192))
+        wait(lambda:node_quota('xray:local')['blocked'])
+        wait(lambda:not fresh(18110),25)
+        wait(lambda:not echo(native_socket),25)
+        wait(lambda:fresh(18101) and fresh(18103),25)
+        proof={'old_vless_closed':not echo(native_socket),'hy2_node1':fresh(18101),'hy2_node2':fresh(18103),'panel_available':bool(request('/api/fleet/overview',token=admin))}
+        check('vless_node_quota_closes_old_sessions_but_keeps_panel_and_other_nodes',all(proof.values()),**proof)
+        stop(pp);pp,admin=panel('native-node-quota-restart')
+        check('native_node_quota_keeps_listeners_blocked_after_panel_restart',node_quota('xray:local')['blocked'] and not fresh(18110))
+        request('/api/fleet/nodes/xray:local/quota/reset',method='POST',token=admin)
+        wait(lambda:fresh(18110),25)
+        wait(lambda:not node_quota('xray:local')['enforced_blocked'],25)
+        set_quota('xray:local',0)
+        check('vless_node_quota_reset_restores_existing_subscription',fresh(18110) and request(oldurl)==baseline)
+        native_socket.close()
+        for sock in (a1,a2,a3,b):sock.close()
+        a1,a2,a3,b=conn(18101),conn(18102),conn(18103),conn(18104)
+    if os.environ.get('CONSOLE_ACL')=='1':
+        request('/api/fleet/users/alice',{'tags':['acl-test'],'nodes':['node1'],'status':'active','data_limit':0},method='PUT',token=admin)
+        wait(lambda:A not in request('/api/hy2/nodes/node2/policy',token=TOKEN[:-1]+'2')['allowed'])
+        wait(lambda:not fresh(18103))
+        try:wait(lambda:not fresh(18110),35)
+        except TimeoutError:
+            print('ACL diagnostic: '+json.dumps({'user':request('/api/fleet/users/alice',token=admin)['nodes'],
+                'local_quota':request('/api/fleet/nodes/xray:local',token=admin)['quota']}),flush=True)
+            raise
+        check('selected_hy2_node_accepts_network_traffic',fresh(18101))
+        check('unselected_hy2_node_blocks_network_traffic',not fresh(18103))
+        check('unselected_local_xray_blocks_new_network_traffic',not fresh(18110))
+        check('restricted_subscription_omits_unmapped_vless',b'vless://' not in base64.b64decode(request(oldurl)))
+        stop(pp);pp,admin=panel('acl-restart')
+        check('node_access_and_tags_survive_panel_restart',request('/api/fleet/users/alice',token=admin)['nodes']==['node1']
+            and request('/api/fleet/users/alice',token=admin)['tags']==['acl-test'])
+        check('restart_configuration_keeps_local_xray_blocked',not fresh(18110))
+        request('/api/fleet/users/alice',{'tags':['acl-test'],'nodes':None,'status':'active','data_limit':0},method='PUT',token=admin)
+        def restored_nodes():
+            result={'hy2_node1':fresh(18101),'hy2_node2':fresh(18103),'vless':fresh(18110)}
+            return result if all(result.values()) else False
+        restored=wait(restored_nodes,30)
+        check('all_nodes_restore_network_access',all(restored.values()),**restored)
+        check('existing_subscription_restored_without_reissue',request(oldurl)==baseline)
+        for sock in (a1,a2,a3,b):sock.close()
+        a1,a2,a3,b=conn(18101),conn(18102),conn(18103),conn(18104)
+    # The restore probes themselves send several KiB. Wait until those bytes
+    # have reached accounting before setting a deliberately small new limit.
+    settled={'value':None,'since':time.monotonic()}
+    def settled_usage():
+        value=request('/api/user/alice',token=admin)['used_traffic']
+        if value!=settled['value']:settled.update(value=value,since=time.monotonic())
+        return {'value':value} if time.monotonic()-settled['since']>=2 else False
+    used=wait(settled_usage,15)['value']
     request('/api/user/alice',{'data_limit':used+4000},method='PUT',token=admin)
     quota_started=time.monotonic()
-    check('traffic_crosses_limit',echo(a1,4096))
+    completed_echo=echo(a1,4096)
     wait(lambda:request('/api/user/alice',token=admin)['status']=='limited')
+    # Correct enforcement may close the stream before the over-limit echo is
+    # complete; require charged traffic and the limit transition, not overrun.
+    check('traffic_crosses_limit',request('/api/user/alice',token=admin)['used_traffic']>=used+4000,
+          over_limit_echo_completed=completed_echo)
     blocked={}
     def all_blocked():
         for name,s in [('a1',a1),('a2',a2),('a3',a3)]:

@@ -55,6 +55,8 @@ class Store:
                 '''CREATE TABLE IF NOT EXISTS hy2_identities (
                    auth TEXT PRIMARY KEY, user_id INTEGER NOT NULL, username TEXT NOT NULL,
                    created_at TEXT NOT NULL, admin_id INTEGER)''',
+                '''CREATE TABLE IF NOT EXISTS hy2_samples (
+                   node TEXT NOT NULL,hour TEXT NOT NULL,seen_at REAL NOT NULL,PRIMARY KEY(node,hour))''',
             ):
                 db.execute(sql)
             if 'auth' not in {r['name'] for r in db.execute('PRAGMA table_info(hy2_hourly)')}:
@@ -100,15 +102,21 @@ class Store:
                 for row in db.execute('SELECT * FROM fleet_barriers'):
                     auths=json.loads(row['auths']);paused.update(auths)
                     if node in json.loads(row['targets']):barriers.append({'id':row['id'],'auths':auths})
-            return {'allowed': [auth for auth, user in users.items() if self.allowed(user) and auth not in paused],'barriers':barriers}
+            from .access import current
+            from .quotas import blocked
+            if node and blocked(node,db):return {'allowed':[],'barriers':barriers,'node_quota_blocked':True}
+            return {'allowed': [auth for auth, user in users.items() if self.allowed(user) and auth not in paused
+                and (current is None or current.allows(user['id'],node,db))],'barriers':barriers}
 
-    def ingest(self, node, batch):
+    def ingest(self, node, batch, commit_hook=None):
         spool, seq, totals = batch['spool'], batch['seq'], batch['totals']
         digest = hashlib.sha256(json.dumps(batch, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         hour = now.replace(minute=0, second=0, microsecond=0).isoformat(' ')
         added = 0
         with self.connection(write=True) as db:
+            if getattr(self,'require_registered_nodes',False) and not db.execute('SELECT 1 FROM fleet_inventory WHERE id=? UNION SELECT 1 FROM fleet_managed WHERE id=?',(node,node)).fetchone():
+                raise Conflict('Node registration was removed')
             old = db.execute('SELECT * FROM hy2_nodes WHERE node=?', (node,)).fetchone()
             if old:
                 if old['spool'] != spool:
@@ -151,6 +159,8 @@ class Store:
             db.execute('''INSERT INTO hy2_nodes VALUES(?,?,?,?,?) ON CONFLICT(node) DO UPDATE
                           SET seq=excluded.seq,digest=excluded.digest,seen_at=excluded.seen_at''',
                        (node,spool,seq,digest,time.time()))
+            db.execute('INSERT INTO hy2_samples VALUES(?,?,?) ON CONFLICT(node,hour) DO UPDATE SET seen_at=excluded.seen_at',(node,hour,time.time()))
+            if commit_hook:commit_hook(db,added)
         return {'accepted': seq, 'added': added, 'duplicate': False}
 
     def report(self):

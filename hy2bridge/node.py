@@ -10,9 +10,11 @@ import threading
 import time
 import urllib.request
 import ssl
+import socket
 from urllib.parse import urlsplit
 
 from .spool import Spool
+from .connections import hy2_summary
 
 
 LOG = logging.getLogger('hy2bridge')
@@ -58,6 +60,44 @@ class Agent:
         self.last_heartbeat=0.0
         self.accounting_durable=False
         self.barrier_seen={}
+        self.last_check=None
+        self.cpu_sample=None
+
+    def traffic_probe(self,request):
+        probe=self.config.get('traffic_probe')
+        if not isinstance(probe,dict):
+            return {'id':request['id'],'passed':False,'stage':'configuration','error':'Контрольный туннель не настроен'}
+        host=probe.get('host','127.0.0.1');port=probe.get('port')
+        if host not in ('127.0.0.1','localhost','::1') or not isinstance(port,int) or not 1<=port<=65535:
+            return {'id':request['id'],'passed':False,'stage':'configuration','error':'Некорректный локальный адрес контрольного туннеля'}
+        payload=os.urandom(min(max(int(probe.get('bytes',1024)),32),65536));started=time.monotonic()
+        try:
+            with socket.create_connection((host,port),timeout=2) as sock:
+                sock.settimeout(2);sock.sendall(payload);received=b''
+                while len(received)<len(payload):
+                    part=sock.recv(len(payload)-len(received))
+                    if not part:break
+                    received+=part
+            if received!=payload:raise OSError('Контрольный ответ не совпал с запросом')
+            return {'id':request['id'],'passed':True,'stage':'payload','bytes':len(payload),'latency_ms':round((time.monotonic()-started)*1000,2)}
+        except OSError as exc:
+            return {'id':request['id'],'passed':False,'stage':'payload','error':str(exc)[:300],'latency_ms':round((time.monotonic()-started)*1000,2)}
+
+    def resources(self,memory,fs):
+        fields=Path('/proc/stat').read_text().splitlines()[0].split()[1:]
+        values=[int(x) for x in fields];idle=values[3]+(values[4] if len(values)>4 else 0);total=sum(values[:8])
+        cpu=None
+        if self.cpu_sample:
+            dt=total-self.cpu_sample[0];cpu=max(0,min(100,round(100*(1-(idle-self.cpu_sample[1])/dt),2))) if dt>0 else None
+        self.cpu_sample=(total,idle)
+        rx=tx=0
+        for line in Path('/proc/net/dev').read_text().splitlines()[2:]:
+            _,raw=line.split(':',1);parts=raw.split();rx+=int(parts[0]);tx+=int(parts[8])
+        kb=lambda key:int(memory.get(key,'0 kB').split()[0])*1024
+        return {'mem_available_bytes':kb('MemAvailable'),'mem_total_bytes':kb('MemTotal'),
+            'swap_total_bytes':kb('SwapTotal'),'swap_free_bytes':kb('SwapFree'),
+            'disk_free_bytes':fs.f_bavail*fs.f_frsize,'disk_total_bytes':fs.f_blocks*fs.f_frsize,
+            'net_rx_bytes':rx,'net_tx_bytes':tx,'cpu_percent':cpu,'cpu_load1':os.getloadavg()[0]}
 
     def epoch(self):
         pid=int(Path(self.config['pid_file']).read_text().strip())
@@ -92,6 +132,8 @@ class Agent:
             policy=self.http.request(cfg['panel_url']+'/policy',cfg['node_token'])
             allowed=policy['allowed']
             barriers=policy.get('barriers',[])
+            if policy.get('check') and policy['check'].get('id') != (self.last_check or {}).get('id'):
+                self.last_check=self.traffic_probe(policy['check'])
             if not isinstance(allowed,list) or not all(isinstance(x,str) for x in allowed):
                 raise ValueError('Invalid policy')
             with self.lock:
@@ -143,11 +185,15 @@ class Agent:
                 payload={'error':('stats_unavailable' if self.last_error=='EnforcementUnavailable' else 'accounting_failed') if self.last_error else None,
                     'uptime_seconds':int(time.monotonic()-self.started_at),'accounting_durable':self.accounting_durable,
                     'core_version':cfg.get('core_version','unknown'),'kick_attempts':self.kick_attempts,
-                    'online_users':len(online) if online is not None else None,
+                    'service_healthy':online is not None,
+                    'online_users':sum(v>0 for v in online.values()) if online is not None else None,
                     'online_connections':sum(online.values()) if online is not None else None,
-                    'mem_available_bytes':int(memory['MemAvailable'].split()[0])*1024,
-                    'disk_free_bytes':fs.f_bavail*fs.f_frsize,'cpu_load1':os.getloadavg()[0]}
+                    'connection_details':hy2_summary(online,cfg['node_token'].encode()) if online is not None else None,
+                    'connection_metric_state':'available' if online is not None else 'unavailable',
+                    **self.resources(memory,fs)}
+                if self.last_check:payload['check']=self.last_check
                 self.http.request(cfg['panel_url']+'/health',cfg['node_token'],payload)
+                if self.last_check: self.last_check=None
             except Exception:
                 # A telemetry failure must not discard already durable usage or
                 # overwrite the control lease; stale heartbeats are visible centrally.

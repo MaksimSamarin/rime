@@ -1,6 +1,8 @@
 """Dynamic node credentials and additive subscription endpoints."""
 import hashlib
 import hmac
+import json
+import time
 from urllib.parse import quote
 
 
@@ -12,6 +14,8 @@ class Registry:
                 id TEXT PRIMARY KEY,protocol TEXT NOT NULL,token_hash TEXT,name TEXT NOT NULL,
                 domain TEXT NOT NULL,port INTEGER NOT NULL,active INTEGER NOT NULL DEFAULT 0,
                 native_id INTEGER,host_id INTEGER)''')
+            db.execute('''CREATE TABLE IF NOT EXISTS fleet_external_links(
+                node TEXT PRIMARY KEY,prefix TEXT NOT NULL,suffix TEXT NOT NULL,position INTEGER NOT NULL)''')
 
     def authorize(self,node,header):
         with self.store.connection() as db:
@@ -19,9 +23,15 @@ class Registry:
         return bool(row and row['token_hash'] and hmac.compare_digest(row['token_hash'],hashlib.sha256(header.removeprefix('Bearer ').encode()).hexdigest()) and header.startswith('Bearer '))
 
     def links(self,auth):
+        from .access import current
         with self.store.connection() as db:
             rows=db.execute("SELECT * FROM fleet_managed WHERE protocol='hysteria2' AND active=1 ORDER BY id").fetchall()
-        return [f"hysteria2://{quote(str(auth),safe='')}@{r['domain']}:{r['port']}/?sni={r['domain']}#{quote(r['name'],safe='')}" for r in rows]
+            external=db.execute('SELECT * FROM fleet_external_links ORDER BY position,node').fetchall()
+            if current:
+                user=self.store.users(db).get(str(auth))
+                rows=[r for r in rows if user and current.allows(user['id'],r['id'],db)]
+                external=[r for r in external if user and current.allows(user['id'],r['node'],db)]
+        return [r['prefix']+quote(str(auth),safe='')+r['suffix'] for r in external]+[f"hysteria2://{quote(str(auth),safe='')}@{r['domain']}:{r['port']}/?sni={r['domain']}#{quote(r['name'],safe='')}" for r in rows]
 
     def install_links(self):
         from app.subscription import share
@@ -56,7 +66,10 @@ class Registry:
                 db.execute('INSERT INTO fleet_managed(id,protocol,token_hash,name,domain,port,native_id) VALUES(?,?,?,?,?,?,?)',
                     (job,d['protocol'],hashlib.sha256(token.encode()).hexdigest(),d['name'],d['domain'],d['vpn_port'],native_id))
             if d['protocol']=='hysteria2':operations.ensure_node(job,d['name'],address=d['host'])
-            else:xray.operations.connect_node(native_id)
+            else:
+                operations.observers.register_native('xray:'+str(native_id),token,d['domain'],d['vpn_port'])
+                xray.operations.connect_node(native_id)
+            return {'node':job if native_id is None else 'xray:'+str(native_id),'native_id':native_id}
 
         def unregister(job,d):
             with self.store.connection() as db:row=db.execute('SELECT * FROM fleet_managed WHERE id=?',(job,)).fetchone()
@@ -78,6 +91,12 @@ class Registry:
                         db.commit()
                 xray.hosts.update()
             with self.store.connection(write=True) as db:
+                aliases=[job]+(['xray:'+str(native_id)] if native_id else [])
+                for alias in aliases:
+                    if db.execute("SELECT 1 FROM sqlite_master WHERE name='fleet_observers'").fetchone():db.execute('DELETE FROM fleet_observers WHERE node=?',(alias,))
+                    if db.execute("SELECT 1 FROM sqlite_master WHERE name='fleet_observer_sources'").fetchone():db.execute('DELETE FROM fleet_observer_sources WHERE node=?',(alias,))
+                    db.execute('DELETE FROM fleet_health WHERE node=?',(alias,))
+                    if db.execute("SELECT 1 FROM sqlite_master WHERE name='fleet_health_history'").fetchone():db.execute('DELETE FROM fleet_health_history WHERE node=?',(alias,))
                 db.execute('DELETE FROM fleet_managed WHERE id=?',(job,))
                 db.execute('DELETE FROM fleet_inventory WHERE id=?',(job,))
                 db.execute('DELETE FROM fleet_health WHERE node=?',(job,))
@@ -85,17 +104,28 @@ class Registry:
         def ready(job,d):
             with self.store.connection() as db:row=db.execute('SELECT * FROM fleet_managed WHERE id=?',(job,)).fetchone()
             if not row:return False
-            if d['protocol']=='hysteria2':
-                ok=any(n['id']==job and n['state']=='healthy' and n['metrics'].get('accounting_durable') for n in operations.nodes())
-            else:ok=operations.native_probe(row['native_id']) is True
+            node_id=job if d['protocol']=='hysteria2' else 'xray:'+str(row['native_id'])
+            with self.store.connection() as db:health=db.execute('SELECT seen_at,data FROM fleet_health WHERE node=?',(node_id,)).fetchone()
+            node={'seen_at':health['seen_at'],'metrics':json.loads(health['data'])} if health else None
+            from .telemetry import complete_resources
+            ok=bool(node and complete_resources(node) and not node['metrics'].get('error'))
+            if node and d.get('_expected_memory') is not None:ok=ok and node['metrics'].get('mem_total_bytes')==d['_expected_memory']
+            if d['protocol']=='hysteria2':ok=ok and node['metrics'].get('accounting_durable') is True
+            else:ok=ok and operations.native_probe(row['native_id']) is True
             if not ok:return False
             host_id=None
             if d['protocol']=='vless' and not row['active']:
                 t=settings['vless_template']
                 with GetDB() as db:
-                    hosts=crud.add_host(db,t['inbound_tag'],ProxyHost(remark=d['name']+' ['+job+']',address=d['domain'],port=d['vpn_port'],sni=d['domain']))
-                    host_id=hosts[-1].id
+                    remark=d['name']+' ['+job+']'
+                    host=db.query(DBHost).filter(DBHost.remark==remark,DBHost.address==d['domain'],DBHost.port==d['vpn_port']).one_or_none()
+                    if host is None:
+                        crud.add_host(db,t['inbound_tag'],ProxyHost(remark=remark,address=d['domain'],port=d['vpn_port'],sni=d['domain']))
+                        host=db.query(DBHost).filter(DBHost.remark==remark,DBHost.address==d['domain'],DBHost.port==d['vpn_port']).one()
+                    host_id=host.id
                 xray.hosts.update()
-            with self.store.connection(write=True) as db:db.execute('UPDATE fleet_managed SET active=1,host_id=COALESCE(?,host_id) WHERE id=?',(host_id,job))
+            with self.store.connection(write=True) as db:
+                db.execute('UPDATE fleet_managed SET active=1,host_id=COALESCE(?,host_id) WHERE id=?',(host_id,job))
+                if host_id is not None:db.execute('INSERT OR REPLACE INTO fleet_host_nodes VALUES(?,?)',(host_id,node_id))
             return True
         return register,unregister,ready

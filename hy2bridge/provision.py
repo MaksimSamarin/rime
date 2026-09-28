@@ -100,10 +100,10 @@ class Provisioner:
             domain=d['domain'].lower()
             if not any(domain==n.lower() or (n.startswith('*.') and domain.count('.')==n.count('.') and domain.endswith(n[1:].lower())) for n in names):raise ValueError()
         except Exception:raise ProvisionError('Сертификат, ключ, срок действия или SAN домена не совпадают') from None
+        url=urlsplit(self.settings.get('panel_url',''))
+        if url.scheme!='https' and not (self.settings.get('lab_network') and url.hostname in ('127.0.0.1','localhost')):
+            raise ProvisionError('Для связи ноды и мониторинга требуется HTTPS-адрес панели')
         if d['protocol']=='hysteria2':
-            url=urlsplit(self.settings.get('panel_url',''))
-            if url.scheme!='https' and not (self.settings.get('lab_network') and url.hostname in ('127.0.0.1','localhost')):
-                raise ProvisionError('Для ноды требуется HTTPS-адрес панели')
             if not Path(self.settings.get('hy2_bundle','')).is_file():raise ProvisionError('Сборка ядра и агента не настроена')
         elif not self.settings.get('vless_template'):raise ProvisionError('Шаблон VLESS не настроен администратором')
 
@@ -156,6 +156,7 @@ class Provisioner:
         d=record['data'];job=record['plan']['id'];registered=False;installed=False
         try:
             self.validate(d)
+            d['_expected_memory']=record.get('remote',{}).get('mem_total_bytes')
             token=secrets.token_urlsafe(48)
             cfg=self.configuration(job,d,token)
             with self.connect(d) as client:
@@ -175,14 +176,17 @@ class Provisioner:
                 result=self.remote(client,cfg)
                 if not result['running']:raise ProvisionError('Контейнер завершился')
                 if cfg.get('lab_network')=='bridge' and d['protocol']=='vless':d['_registration_address']=result['ip']
-                self.register(job,d,token);registered=True
-                self.update(job,'running','Ожидание связи с панелью')
+                registration=self.register(job,d,token);registered=True
+                if d['protocol']=='vless':
+                    self.update(job,'running','Настройка отдельного сборщика ресурсов')
+                    self.remote(client,self.observer_configuration(job,d,token,registration))
+                self.update(job,'running','Ожидание первых свежих CPU, RAM, диска и сетевых метрик')
                 deadline=time.monotonic()+45
                 while time.monotonic()<deadline:
                     if self.ready(job,d):break
                     time.sleep(1)
-                else:raise ProvisionError('Нода не подтвердила готовность')
-                self.update(job,'succeeded','Нода подключена к панели')
+                else:raise ProvisionError('Нода не подтвердила готовность или не передала полные свежие метрики')
+                self.update(job,'succeeded','Нода подключена; свежие метрики ресурсов получены и проверены')
         except Exception as exc:
             logging.getLogger('fleet').error('Provision job %s failed (%s): %s',job,type(exc).__name__,str(exc) if isinstance(exc,ProvisionError) else 'details withheld')
             rollback=True
@@ -193,9 +197,11 @@ class Provisioner:
                 try:
                     with self.connect(d) as client:self.remote(client,{'action':'rollback','id':job})
                 except Exception:rollback=False
+            reason=str(exc) if isinstance(exc,ProvisionError) else 'Внутренняя ошибка установки'
             self.update(job,'rolled_back' if installed and rollback else 'failed',
                         'Установка не завершена; новая регистрация и контейнер отозваны, данные сохранены' if installed and rollback else
                         'Установка не завершена; требуется проверить сервер и регистрацию ноды')
+            self.update(job,'rolled_back' if installed and rollback else 'failed',reason)
         finally:
             d.clear()
 
@@ -210,6 +216,9 @@ class Provisioner:
                 'auth_port':18888,'spool':'/state/spool.db','pid_file':'/state/hysteria.pid',
                 'interval':1,'policy_ttl':5,'durable':True,'traffic_wal':'/state/traffic.wal','core_version':'2.12.3-fleet.1'}
             files['agent.json']=json.dumps(agent)
+            if self.settings.get('panel_ca_file'):
+                files['panel-ca.pem']=Path(self.settings['panel_ca_file']).read_text()
+                agent['panel_ca']='/state/panel-ca.pem';files['agent.json']=json.dumps(agent)
             files['hysteria.json']=json.dumps({'listen':':24443','tls':{'cert':'/state/cert.pem','key':'/state/key.pem'},
                 'auth':{'type':'http','http':{'url':'http://127.0.0.1:18888/auth'}},
                 'trafficStats':{'listen':'127.0.0.1:19999','secret':agent['stats_secret']}})
@@ -221,3 +230,16 @@ class Provisioner:
                         'SSL_KEY_FILE':'/state/node-key.pem','INBOUNDS':t['inbound_tag']}
             cfg['mounts']=[('cert.pem',t['certificate_path']),('key.pem',t['key_path'])]
         return cfg
+
+    def observer_configuration(self,job,d,token,registration):
+        from urllib.parse import quote
+        node=registration['node'];template=self.settings['vless_template']
+        cfg={'url':self.settings['panel_url'].rstrip('/')+'/api/fleet/telemetry/'+quote(node,safe=''),
+             'token':token,'protocol':'xray','vpn_port':template['inbound_port'],'process_names':['xray'],
+             'disk_path':'/observer','interval':5,
+             'allow_loopback_http':bool(self.settings.get('lab_network'))}
+        files={name:Path(__file__).with_name(name).read_text() for name in ('observer.py','connections.py','meter.py','spool.py')}
+        if self.settings.get('panel_ca_file'):
+            files['panel-ca.pem']=Path(self.settings['panel_ca_file']).read_text();cfg['ca_file']='/observer/panel-ca.pem'
+        files['config.json']=json.dumps(cfg)
+        return {'action':'observer','id':job,'image':template['image'],'files':files}

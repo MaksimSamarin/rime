@@ -10,7 +10,7 @@ from fastapi.routing import APIRoute
 
 from config import ALLOWED_ORIGINS, DOCS, XRAY_SUBSCRIPTION_PATH
 
-__version__ = "0.2.0-rc1"
+__version__ = "0.2.0-rc6"
 __upstream_version__ = "0.8.4"
 
 app = FastAPI(

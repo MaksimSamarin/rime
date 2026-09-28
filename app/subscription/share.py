@@ -266,6 +266,9 @@ def process_inbounds_and_tags(
             format_variables.update({"TRANSPORT": inbound["network"]})
             host_inbound = inbound.copy()
             for host in xray.hosts.get(tag, []):
+                from hy2bridge.access import host_allowed
+                if not host_allowed(format_variables.get('USERNAME'), host.get('id')):
+                    continue
                 sni = ""
                 sni_list = host["sni"] or inbound["sni"]
                 if sni_list:

@@ -1,4 +1,5 @@
 from functools import lru_cache
+import threading
 from typing import TYPE_CHECKING
 
 from sqlalchemy.exc import SQLAlchemyError
@@ -11,10 +12,13 @@ from app.utils.concurrency import threaded_function
 from app.xray.node import XRayNode
 from xray_api import XRay as XRayAPI
 from xray_api.types.account import Account, XTLSFlows
+from hy2bridge.access import allows, filter_config
 
 if TYPE_CHECKING:
     from app.db import User as DBUser
     from app.db.models import Node as DBNode
+
+NODE_LIFECYCLE_LOCK=threading.RLock()
 
 
 @lru_cache(maxsize=None)
@@ -84,9 +88,10 @@ def add_user(dbuser: "DBUser"):
             ):
                 account.flow = XTLSFlows.NONE
 
-            _add_user_to_inbound(xray.api, inbound_tag, account)  # main core
-            for node in list(xray.nodes.values()):
-                if node.connected and node.started:
+            if allows(dbuser.id, 'xray:local'):
+                _add_user_to_inbound(xray.api, inbound_tag, account)
+            for node_id, node in list(xray.nodes.items()):
+                if node.connected and node.started and allows(dbuser.id, 'xray:'+str(node_id)):
                     _add_user_to_inbound(node.api, inbound_tag, account)
 
 
@@ -130,10 +135,16 @@ def update_user(dbuser: "DBUser"):
             ):
                 account.flow = XTLSFlows.NONE
 
-            _alter_inbound_user(xray.api, inbound_tag, account)  # main core
-            for node in list(xray.nodes.values()):
+            if allows(dbuser.id, 'xray:local'):
+                _alter_inbound_user(xray.api, inbound_tag, account)
+            else:
+                _remove_user_from_inbound(xray.api, inbound_tag, email)
+            for node_id, node in list(xray.nodes.items()):
                 if node.connected and node.started:
-                    _alter_inbound_user(node.api, inbound_tag, account)
+                    if allows(dbuser.id, 'xray:'+str(node_id)):
+                        _alter_inbound_user(node.api, inbound_tag, account)
+                    else:
+                        _remove_user_from_inbound(node.api, inbound_tag, email)
 
     for inbound_tag in xray.config.inbounds_by_tag:
         if inbound_tag in active_inbounds:
@@ -146,6 +157,10 @@ def update_user(dbuser: "DBUser"):
 
 
 def remove_node(node_id: int):
+    with NODE_LIFECYCLE_LOCK:return _remove_node(node_id)
+
+
+def _remove_node(node_id: int):
     if node_id in xray.nodes:
         try:
             xray.nodes[node_id].disconnect()
@@ -194,6 +209,10 @@ _connecting_nodes = {}
 
 @threaded_function
 def connect_node(node_id, config=None):
+    with NODE_LIFECYCLE_LOCK:return _connect_node(node_id,config)
+
+
+def _connect_node(node_id, config=None):
     global _connecting_nodes
 
     if _connecting_nodes.get(node_id):
@@ -220,7 +239,7 @@ def connect_node(node_id, config=None):
         if config is None:
             config = xray.config.include_db_users()
 
-        node.start(config)
+        node.start(filter_config(config, 'xray:'+str(node_id)))
         version = node.get_version()
         _change_node_status(node_id, NodeStatus.connected, version=version)
         logger.info(f"Connected to \"{dbnode.name}\" node, xray run on v{version}")
@@ -238,6 +257,10 @@ def connect_node(node_id, config=None):
 
 @threaded_function
 def restart_node(node_id, config=None):
+    with NODE_LIFECYCLE_LOCK:return _restart_node(node_id,config)
+
+
+def _restart_node(node_id, config=None):
     with GetDB() as db:
         dbnode = crud.get_node_by_id(db, node_id)
 
@@ -258,7 +281,7 @@ def restart_node(node_id, config=None):
         if config is None:
             config = xray.config.include_db_users()
 
-        node.restart(config)
+        node.restart(filter_config(config, 'xray:'+str(node_id)))
         logger.info(f"Xray core of \"{dbnode.name}\" node restarted")
     except Exception as e:
         _change_node_status(node_id, NodeStatus.error, message=str(e))

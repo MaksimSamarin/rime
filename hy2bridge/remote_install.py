@@ -4,6 +4,7 @@ Only manages a new, labelled Docker container and its own directory. Failed
 installs retain their data for investigation; no host packages/firewall changes.
 """
 import json
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -24,6 +25,7 @@ def run(args):
 
 def main(c):
     global DIAGNOSTIC
+    os.umask(0o077)
     assert re.fullmatch('[a-f0-9]{32}',c['id'])
     directory=Path.home()/'.local/share/fleet-nodes'/c['id']
     name='fleet-'+c['id']
@@ -42,8 +44,15 @@ def main(c):
         stat=os.statvfs(Path.home())
         checks.append({'passed':stat.f_bavail*stat.f_frsize>2*1024**3,'message':'Свободно более 2 GiB'})
         checks.append({'passed':not directory.exists(),'message':'Новая отдельная директория'})
-        return {'checks':checks,'home':str(Path.home()),'uid':os.getuid(),'gid':os.getgid()}
+        memory=int(next(line.split()[1] for line in Path('/proc/meminfo').read_text().splitlines() if line.startswith('MemTotal:')))*1024
+        return {'checks':checks,'home':str(Path.home()),'uid':os.getuid(),'gid':os.getgid(),'mem_total_bytes':memory}
     if c['action']=='rollback':
+        observer='fleet-observer-'+c['id']
+        found=subprocess.run(['docker','inspect',observer],capture_output=True,text=True)
+        if found.returncode==0:
+            info=json.loads(found.stdout)[0]
+            if info['Config']['Labels'].get('fleet.job')!=c['id']:raise RuntimeError('Observer ownership mismatch')
+            run(['docker','rm','-f',observer])
         try:info=json.loads(run(['docker','inspect',name]))[0]
         except Exception:return {'removed':False}
         if info['Config']['Labels'].get('fleet.job')!=c['id']:raise RuntimeError('Ownership mismatch')
@@ -51,6 +60,40 @@ def main(c):
         (directory/'rollback-runtime.log').write_text((log.stdout+log.stderr)[-16384:])
         run(['docker','rm','-f',name])
         return {'removed':True,'data_retained':True}
+    if c['action']=='observer':
+        assert directory.resolve()==directory and not directory.is_symlink()
+        main=json.loads(run(['docker','inspect',name]))[0]
+        if main['Config']['Labels'].get('fleet.job')!=c['id'] or not main['State']['Running']:raise RuntimeError('VPN container ownership or state mismatch')
+        observer='fleet-observer-'+c['id'];home=directory/'observer'
+        if home.is_symlink():raise RuntimeError('Observer directory is a symlink')
+        home.mkdir(mode=0o700,exist_ok=True);DIAGNOSTIC=directory/'observer-error.log'
+        allowed={'observer.py','connections.py','meter.py','spool.py','config.json','panel-ca.pem'}
+        if not set(c['files'])<=allowed or 'config.json' not in c['files']:raise ValueError('Invalid observer files')
+        digest=hashlib.sha256(json.dumps(c['files'],sort_keys=True).encode()).hexdigest()
+        for filename,content in c['files'].items():
+            path=home/filename
+            if path.is_symlink() or (path.exists() and path.read_text()!=content):raise RuntimeError('Existing observer configuration differs')
+        for filename,content in c['files'].items():
+            if not (home/filename).exists():(home/filename).write_text(content)
+        existing=subprocess.run(['docker','inspect',observer],capture_output=True,text=True)
+        if existing.returncode==0:
+            info=json.loads(existing.stdout)[0];labels=info['Config'].get('Labels',{})
+            if labels.get('fleet.job')!=c['id'] or labels.get('fleet.observer.config')!=digest:raise RuntimeError('Existing observer ownership differs')
+            if not info['State']['Running']:run(['docker','start',observer])
+            return {'running':True,'already_configured':True}
+        image=c['image']
+        if not re.fullmatch(r'[a-zA-Z0-9./:_-]+@sha256:[0-9a-f]{64}',image):raise ValueError('Observer image must be pinned')
+        args=['docker','run','-d','--name',observer,'--label','fleet.job='+c['id'],'--label','fleet.observer.config='+digest,
+            '--restart','unless-stopped','--cpus','0.1','--memory','64m','--pids-limit','32','--cap-drop','ALL',
+            '--security-opt','no-new-privileges','--read-only','--tmpfs','/tmp:rw,noexec,nosuid,size=8m',
+            '--network','container:'+name,'--pid','container:'+name,'--user',f'{os.getuid()}:{os.getgid()}',
+            '--log-driver','json-file','--log-opt','max-size=2m','--log-opt','max-file=2',
+            '--mount',f'type=bind,src={home},dst=/observer,readonly']
+        for filename in ['meminfo','stat','uptime','loadavg']:
+            args+=['--mount',f'type=bind,src=/proc/{filename},dst=/proc/{filename},readonly']
+        args+=['--entrypoint','python',image,'/observer/observer.py','--config','/observer/config.json']
+        run(args)
+        return {'running':json.loads(run(['docker','inspect',observer]))[0]['State']['Running'],'already_configured':False}
     if c['action']=='status':
         info=json.loads(run(['docker','inspect',name]))[0]
         return {'running':info['State']['Running'],'restarts':info['RestartCount']}

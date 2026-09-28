@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock,patch
 import test_accounting
 from hy2bridge.provision import Provisioner,ProvisionError
 from hy2bridge.registry import Registry
@@ -7,6 +7,29 @@ from hy2bridge.registry import Registry
 class ProvisionTests(unittest.TestCase):
     setUp=test_accounting.AccountingTests.setUp
     tearDown=test_accounting.AccountingTests.tearDown
+
+    def test_vless_deploy_configures_observer_before_ready_and_waits_for_metrics(self):
+        import json
+        settings={'panel_url':'https://panel.invalid','vless_template':{'image':'node@sha256:'+'0'*64,'inbound_port':24443}}
+        register=MagicMock(return_value={'node':'xray:7','native_id':7});ready=MagicMock(side_effect=[False,True])
+        p=Provisioner(self.store,settings,register,MagicMock(),ready);p.validate=lambda _:None
+        p.configuration=lambda *args:{'action':'install','id':args[0]};p.connect=lambda _:MagicMock();p.remote=MagicMock(return_value={'running':True})
+        job='b'*32;record={'data':{'protocol':'vless','domain':'node.invalid','vpn_port':443},'plan':{'id':job}}
+        with patch('hy2bridge.provision.time.sleep'):p.worker(record)
+        calls=[c.args[1] for c in p.remote.call_args_list];self.assertEqual([c['action'] for c in calls],['install','observer'])
+        observer=json.loads(calls[1]['files']['config.json'])
+        self.assertTrue(observer['url'].endswith('/api/fleet/telemetry/xray%3A7'))
+        self.assertEqual(observer['vpn_port'],24443);self.assertEqual(ready.call_count,2)
+        self.assertEqual(p.job(job)['state'],'succeeded');self.assertEqual(record['data'],{})
+
+    def test_missing_metrics_rolls_back_instead_of_claiming_success(self):
+        p=Provisioner(self.store,{},MagicMock(return_value={'node':'xray:7'}),MagicMock(),lambda *_:False)
+        p.validate=lambda _:None;p.configuration=lambda *args:{'action':'install','id':args[0]};p.observer_configuration=lambda *args:{'action':'observer','id':args[0]}
+        p.connect=lambda _:MagicMock();p.remote=MagicMock(return_value={'running':True})
+        job='c'*32;record={'data':{'protocol':'vless'},'plan':{'id':job}}
+        with patch('hy2bridge.provision.time.sleep'),patch('hy2bridge.provision.time.monotonic',side_effect=[0,1,50]):p.worker(record)
+        self.assertEqual(p.job(job)['state'],'rolled_back')
+        self.assertIn('метрики',p.job(job)['message']);p.unregister.assert_called_once()
 
     def test_target_allowlist_rejects_unlisted_and_shell_input(self):
         p=Provisioner(self.store,{'allowed_hosts':['test.invalid']},None,None,None)
