@@ -45,6 +45,7 @@ def hosts(storage: dict):
             storage[inbound_tag] = [
                 {
                     "remark": host.remark,
+                    "id": host.id,
                     "address": [i.strip() for i in host.address.split(',')] if host.address else [],
                     "port": host.port,
                     "path": host.path if host.path else None,

@@ -104,6 +104,8 @@ class XRayCore:
         return False
 
     def start(self, config: XRayConfig):
+        from hy2bridge.access import filter_config
+        config = filter_config(config, 'xray:local')
         if self.started is True:
             raise RuntimeError("Xray is started already")
 

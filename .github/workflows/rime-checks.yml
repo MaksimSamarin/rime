@@ -14,7 +14,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: pip install -r requirements-panel.txt
+      - run: pip install -r requirements-panel.txt -c requirements.lock
       - run: python -m unittest discover -s tests -p 'test_*.py' -v
       - run: python -m compileall -q hy2bridge app main.py panel_entry.py
   dashboard:
@@ -30,6 +30,8 @@ jobs:
           cache: npm
           cache-dependency-path: app/dashboard/package-lock.json
       - run: npm ci
+      - run: node --test ../../tests/monitoring.test.cjs
+      - run: node --check ../../hy2bridge/web/console.js && node --check ../../hy2bridge/web/app.js
       - run: npm run build -- --outDir build --assetsDir statics
         env:
           VITE_BASE_API: /api/
@@ -55,5 +57,14 @@ jobs:
                   if attempt==59: raise
                   time.sleep(1)
           '
+      - name: Verify console user creation and subscriptions
+        run: |
+          docker run --rm --network none --cpus 1 --memory 512m --pids-limit 256 \
+            --cap-drop ALL --security-opt no-new-privileges --read-only \
+            --tmpfs /tmp:rw,nosuid,size=128m --tmpfs /suite:rw,nosuid,size=64m \
+            -v "${PWD}/tests:/tests:ro" \
+            -e LAB_SUITE_ROOT=/suite -e RUN_ID=console-creation \
+            -e XRAY_TEST_BINARY=/usr/local/bin/xray -e PYTHONDONTWRITEBYTECODE=1 \
+            --entrypoint python rime:check /tests/console_creation.py
       - if: failure()
         run: docker logs rime-ci

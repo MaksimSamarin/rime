@@ -3,8 +3,8 @@
 Rime currently supports SQLite and exactly one panel process. The controller locks
 `<database>.fleet.lock`; MySQL and multiple workers are unsupported. Existing
 environment variables, `/api`, subscription routes and `/var/lib/marzban` mounts
-are preserved. `/dashboard/` manages users; `/fleet` provides infrastructure.
-Both use the same administrator accounts, but currently require separate logins.
+are preserved. `/fleet` is the unified console for users, reports and infrastructure.
+`/dashboard/` redirects to its Users page. See [console workflow](CONSOLE.md).
 Infrastructure requires a sudo admin. Tokens are never passed in URLs.
 
 Run `alembic upgrade head` followed by `python main.py`. The Docker entry point
@@ -48,6 +48,26 @@ Run Hy2 with `hy2bridge.supervisor`, persistent `spool` and `traffic_wal`,
 The supervisor stops its core when the control lease expires. Defaults: 1-second
 polling, 5-second auth TTL, 15-second supervisor lease.
 
+## End-to-end node check
+
+The node agent can verify payload delivery through a dedicated local VPN client
+tunnel. Configure a loopback-only forward on the node and add it to the agent:
+
+```json
+"traffic_probe": {"host": "127.0.0.1", "port": 18101, "bytes": 2048}
+```
+
+The forward must use a dedicated probe account and terminate at a fixed echo
+service. `Проверить VPN-трафик` queues a check for the agent. A byte-for-byte echo
+opens or resolves `traffic_failed`. A TCP connect to the public VPN port alone is
+never a successful check. Nodes without this agent show `Не проверялся` and reject
+manual checks instead of returning a false green status.
+
+Native VLESS node edits update Marzban's node record and schedule a reconnect.
+For managed Hysteria2 nodes, domain, VPN port and publication state edit the
+subscription inventory; changing the remote service still requires a controlled
+redeployment.
+
 ## Subscription continuity
 
 Preserve subscription domain/path, signing material, user creation dates, UUIDs,
@@ -62,8 +82,9 @@ all Clash/sing-box variants are not claimed.
 
 Hy2 accounts accepted payload after fsync and before forwarding, not confirmed
 delivery or IP/QUIC overhead. A crash can charge accepted but unsent bytes.
-Polling quotas can overshoot under load. Hours represent posting time; native
-Xray direction is unavailable. Missing historic data cannot be reconstructed.
+Polling quotas can overshoot under load. Hours represent posting time. Per-user
+Xray reports combine directions; node quotas use raw directional node counters.
+Missing historic data cannot be reconstructed.
 
 Before migration, checkpoint the panel SQLite with `.backup`, config, signing
 material, binaries and every node's spool/WAL. Pilot one node and actual clients.
@@ -77,4 +98,10 @@ The baseline integration passed isolated Linux lab checks: 51 integration checks
 counters after SIGKILL. These are baseline results, not a production SLA or a
 claim that every fork build has passed them. Consult the PR for rerun checks.
 Public-network behavior, real client applications and sustained observation
-remain pilot gates. Production has not been migrated.
+remain deployment-specific pilot gates. Controlled production migration and
+rollback rehearsals have been completed; they do not qualify every installation.
+
+
+Native node monitoring materializes SQLite query results before remote RPCs.
+Do not keep active read cursors during network operations: production may use
+SQLite rollback journal mode, where such readers block accounting commits.

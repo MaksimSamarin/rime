@@ -3,9 +3,12 @@
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Rime — управление VPN-инфраструктурой</title>
-  <link rel="icon" type="image/svg+xml" href="/fleet/assets/rime.svg">
-  <link rel="stylesheet" href="/fleet/assets/style.css">
-  <script src="/fleet/assets/app.js" defer></script>
+  <link rel="icon" type="image/svg+xml" href="/fleet/assets/rime.svg?v=20260926-2">
+  <link rel="stylesheet" href="/fleet/assets/style.css?v=20260926-2">
+  <script src="/fleet/assets/app.js?v=traffic-lifecycle-1" defer></script>
+  <script src="/fleet/assets/monitoring.js?v=traffic-lifecycle-1" defer></script>
+  <script src="/fleet/assets/console.js?v=traffic-lifecycle-1" defer></script>
+  <link rel="stylesheet" href="/fleet/assets/console.css?v=traffic-lifecycle-1">
 </head>
 <body>
 <a class="skip" href="#main">К содержимому</a>
@@ -28,22 +31,72 @@
     <p class="nav-heading">УПРАВЛЕНИЕ СЕТЬЮ</p>
     <nav aria-label="Основная навигация">
       <a href="#overview" data-page="overview"><span aria-hidden="true">◫</span> Обзор</a>
+      <a href="#users" data-page="users"><span aria-hidden="true">○</span> Пользователи</a>
+      <a href="#monitoring" data-page="monitoring"><span aria-hidden="true">⌁</span> Мониторинг</a>
       <a href="#traffic" data-page="traffic"><span aria-hidden="true">↗</span> Трафик</a>
       <a href="#events" data-page="events"><span aria-hidden="true">≡</span> События <span id="event-badge" class="count" hidden></span></a>
       <a href="#nodes" data-page="nodes"><span aria-hidden="true">⊞</span> Ноды</a>
     </nav>
-    <div class="sidebar-bottom"><p class="small muted">Управление пользователями</p><a class="external" href="/dashboard/">Пользователи Rime <span aria-hidden="true">↗</span></a><button id="logout" class="quiet">Выйти</button></div>
+    <div class="sidebar-bottom"><p class="small muted">Единое рабочее пространство</p><button id="logout" class="quiet">Выйти</button></div>
   </aside>
   <div class="workspace">
-    <header class="topbar"><span class="breadcrumb">Рабочее пространство <span>/</span> <b id="breadcrumb">Обзор</b></span><div class="top-actions"><span id="freshness" class="small muted">Ожидание данных</span><button id="refresh" class="quiet" aria-label="Обновить данные">Обновить ↻</button><a class="quiet mobile-only" href="/dashboard/">Пользователи</a><button id="logout-mobile" class="quiet mobile-only" aria-label="Log out">Выйти</button><span class="avatar" id="avatar" aria-label="Администратор">A</span></div></header>
+    <header class="topbar"><span class="breadcrumb">Рабочее пространство <span>/</span> <b id="breadcrumb">Обзор</b></span><div class="top-actions"><span id="freshness" class="small muted">Ожидание данных</span><button id="refresh" class="quiet" aria-label="Обновить данные">Обновить ↻</button><button id="logout-mobile" class="quiet mobile-only" aria-label="Выйти">Выйти</button><span class="avatar" id="avatar" aria-label="Администратор">A</span></div></header>
     <main id="main" tabindex="-1">
       <div id="global-error" class="notice error" role="alert" hidden></div>
+      <section id="page-users" class="page" hidden>
+        <div class="page-heading"><div><p class="eyebrow">ДОСТУП К СЕТИ</p><h1>Пользователи</h1><p class="muted">Подписки, лимиты, группы и доступные ноды.</p></div><button id="user-create" class="primary">Создать пользователя</button></div>
+        <form id="user-filters" class="card toolbar"><label>Поиск<input id="user-query" type="search" placeholder="Имя пользователя"></label><label>Группа<select id="user-tag"><option value="">Все теги</option></select></label><button class="secondary">Найти</button></form>
+        <p id="user-count" class="muted" role="status"></p><article class="card"><div id="user-table" class="table-wrap"></div></article>
+        <div class="pagination"><button id="users-prev" class="quiet">← Назад</button><span id="users-page"></span><button id="users-next" class="quiet">Далее →</button></div>
+      </section>
+      <section id="page-monitoring" class="page" hidden>
+        <div class="page-heading"><div><p class="eyebrow">ВСЯ ИНФРАСТРУКТУРА</p><h1>Ресурсы и состояние нод</h1><p class="muted">CPU, память и диски всех серверов на одном экране.</p></div><button id="monitor-refresh" class="secondary" type="button">Обновить ресурсы</button></div>
+        <p id="monitor-status" class="small muted" role="status">Загрузка ресурсов…</p>
+        <article id="panel-host" class="card panel-host" aria-labelledby="panel-host-title" hidden>
+          <div class="card-heading"><div><p class="eyebrow">ЭТОТ СЕРВЕР</p><h2 id="panel-host-title">Сервер панели Rime</h2><p id="panel-host-address" class="small muted"></p></div><span id="panel-host-status" class="badge">Загрузка…</span></div>
+          <div id="panel-host-resources" class="panel-host-resources"></div>
+          <dl id="panel-host-info" class="panel-host-info"></dl>
+          <p class="small muted">CPU и RAM — ресурсы ОС, доступной панели; диск — раздел с её данными. Память процесса панели показана отдельно. Этот сервер учтён в общей сводке один раз.</p>
+        </article>
+        <div id="monitor-summary" class="metric-grid"></div>
+        <article class="card fleet-resources"><div class="card-heading"><div><h2>Все ноды</h2><p id="monitor-coverage" class="small muted"></p></div><span class="badge">Обновление каждые 10 с</span></div>
+          <form id="monitor-filters" class="monitor-filters"><label>Найти ноду<input id="monitor-query" type="search" placeholder="Название или адрес"></label><label>Показывать<select id="monitor-filter"><option value="all">Все ноды</option><option value="attention">Требуют внимания</option><option value="offline">Нет связи</option><option value="missing">Нет полных метрик</option></select></label><label>Порядок<select id="monitor-sort"><option value="attention">Сначала проблемы</option><option value="cpu">По загрузке CPU</option><option value="ram">По заполнению RAM</option><option value="disk">По заполнению диска</option><option value="name">По названию</option></select></label></form>
+          <div id="monitor-table" class="table-wrap"></div>
+          <p class="small muted resource-legend">Пороги внимания: CPU и RAM ≥80%, критично ≥95%; диск ≥80%, критично ≥90%. Показаны ресурсы ОС, видимой агенту, и диск с данными ноды. Замеры старше 30 с исключаются из сводки.</p>
+        </article>
+        <article class="card"><div class="card-heading"><div><h2>История доступности всех нод</h2><p class="small muted">Замер раз в минуту. Пропуски истории не считаются исправной работой.</p></div><label>Период<select id="monitor-hours"><option value="1">Последний час</option><option value="24" selected>24 часа</option><option value="168">7 дней</option></select></label></div><div id="monitor-history"></div></article>
+      </section>
+      <section id="page-node" class="page" hidden>
+        <a href="#nodes" class="text-link">← Все ноды</a><div class="page-heading"><div><p id="node-role" class="eyebrow">КАРТОЧКА НОДЫ</p><h1 id="node-title">Нода</h1><p id="node-subtitle" class="muted"></p></div><div class="form-actions"><a id="hub-monitor-link" class="button secondary" href="#monitoring" hidden>Вся инфраструктура</a><button id="hub-refresh" class="primary" type="button" hidden>Обновить состояние</button><button id="node-check" class="primary" type="button">Проверить VPN-трафик</button><a id="node-report" class="button secondary" href="#traffic">Отчёт по трафику</a><button id="node-delete" class="quiet danger" type="button">Удалить из панели…</button></div></div>
+        <p id="node-check-status" class="card help" role="status">Проверка создаёт реальное подключение через контрольный VPN-клиент и сверяет отправленный payload.</p>
+        <div id="node-metrics" class="metric-grid"></div>
+        <article id="node-quota-card" class="card"><h2>Лимит трафика ноды</h2><div id="node-quota-summary" class="quota-summary" role="status"></div>
+          <form id="node-quota-form"><label class="check"><input id="quota-enabled" type="checkbox"> Включить лимит ноды</label>
+            <fieldset id="quota-fields"><legend>Параметры лимита</legend><div class="form-grid">
+              <label>Объём<input id="quota-volume" type="number" min="0.000001" step="any" required value="5"></label><label>Единица<select id="quota-unit"><option value="1000000000000">ТБ</option><option value="1000000000">ГБ</option></select></label>
+              <label>Расчётный период<select id="quota-period"><option value="monthly">Месяц</option><option value="weekly">Неделя</option><option value="daily">Сутки</option><option value="none">Без автосброса</option></select></label>
+              <label>Следующий сброс, 00:00 UTC<input id="quota-reset-date" type="date" required></label>
+              <label>Направление учёта<select id="quota-direction"><option value="total">Входящий + исходящий</option><option value="outgoing">Исходящий к VPN-клиентам</option></select></label>
+              <label>При исчерпании<select id="quota-action"><option value="warn">Предупредить, оставить VPN включённым</option><option value="stop">Остановить VPN-доступ на этой ноде</option></select></label>
+            </div></fieldset>
+            <p class="small muted">Предупреждения появятся в событиях при 80% и 95%. Лимит считает полезные данные VPN без коэффициента пользователя и сетевых накладных расходов. 1 ТБ = 1000 ГБ. При опросе счётчиков возможен перерасход между замерами.</p>
+            <p class="small muted">Учёт начинается при первом включении лимита. Изменение настроек не обнуляет расход. Остановка затрагивает только VPN этой ноды; подписки и лимиты пользователей сохраняются.</p>
+            <p id="quota-save-status" role="status"></p><div class="form-actions"><button id="quota-new-period" class="secondary" type="button">Начать новый период…</button><button id="quota-save" class="primary">Сохранить лимит</button></div>
+          </form>
+          <div id="quota-reset-confirm" class="notice" hidden><p>Начать новый период этой ноды с нулевого расхода? История трафика и расход пользователей сохранятся. Если VPN был ограничен квотой, доступ возобновится.</p><div class="form-actions"><button id="quota-reset-cancel" class="quiet" type="button">Отмена</button><button id="quota-reset-apply" class="secondary" type="button">Начать период</button></div></div>
+        </article>
+        <article id="hub-details" class="card" hidden><h2>Панель и сервер</h2><p class="muted">Управление пользователями, подписками и подключёнными нодами.</p><dl id="hub-runtime" class="panel-host-info"></dl><p class="small muted">CPU и RAM относятся к ОС, видимой панели. Диск — раздел с её данными. Память процесса панели учитывается отдельно.</p></article>
+        <article class="card"><h2>Мониторинг</h2><div id="node-history"></div><div id="node-resource-charts" class="resource-charts"></div><details><summary>Последние 30 замеров</summary><div id="node-resource-history" class="table-wrap"></div></details></article>
+        <div id="node-settings-layout" class="overview-grid"><article id="node-settings-card" class="card"><h2>Настройки ноды</h2><form id="node-settings"><div id="node-edit-fields" class="form-grid"></div><dl id="node-config" class="settings-list"></dl><div id="node-hosts"></div><p id="node-save-status" role="status"></p><button class="secondary">Сохранить и применить</button></form></article><article class="card"><h2 id="node-events-heading">Проверки и события</h2><div id="node-checks"></div><div id="node-events"></div></article></div>
+        <details id="hub-local-vpn" class="card" hidden><summary>Локальный VPN на этом сервере</summary><p id="hub-xray-status" class="muted"></p><p class="small muted">Если сервер также используется как выходной VPN, его существующие адреса и расход показаны здесь для справки.</p><div id="hub-vpn-hosts"></div><p id="hub-vpn-traffic" class="muted"></p></details>
+        <article id="node-traffic-card" class="card"><h2>Трафик за 7 дней</h2><p id="node-traffic-status" class="small muted"></p><div id="node-traffic-chart" class="chart"></div><div id="node-traffic-users" class="table-wrap"></div></article>
+      </section>
       <section id="page-overview" class="page">
         <div class="page-heading"><div><p class="eyebrow">СОСТОЯНИЕ ИНФРАСТРУКТУРЫ</p><h1>Обзор сети</h1><p class="muted">Живая картина трафика и состояния подключённых нод.</p></div><a class="button primary" href="#deploy">＋ Добавить ноду</a></div>
         <div class="metric-grid">
           <article class="metric"><p>Трафик за период</p><strong id="metric-traffic">—</strong><span class="small muted">Загрузка + отдача · последние 7 дней</span></article>
           <article class="metric"><p>Ноды в работе</p><strong id="metric-nodes">—</strong><span id="metric-nodes-detail" class="small muted">Нет актуальных данных</span></article>
-          <article class="metric"><p>Подключения Hy2</p><strong id="metric-online">—</strong><span class="small muted">Одновременные QUIC-соединения</span></article>
+          <article class="metric"><p>Экземпляры Hy2</p><strong id="metric-online">—</strong><span class="small muted">Клиентские экземпляры, не число людей</span></article>
           <article class="metric"><p>Требуют внимания</p><strong id="metric-errors">—</strong><span class="small muted">Открытые ошибки и потеря связи</span></article>
         </div>
         <div class="overview-grid"><article class="card chart-card"><div class="card-heading"><div><h2>Динамика трафика</h2><p class="small muted">Объём за час · UTC</p></div><div class="legend"><span><i class="hy"></i>Hysteria2</span><span><i class="xr"></i>VLESS / Xray</span></div></div><div id="overview-chart" class="chart" aria-label="Трафик по часам"></div><a class="text-link" href="#traffic">Подробный отчёт →</a></article><article class="card"><div class="card-heading"><h2>Последние события</h2><a class="text-link" href="#events">Все →</a></div><div id="overview-events" class="events-list"><p class="empty">Загрузка событий…</p></div></article></div>
@@ -51,13 +104,15 @@
       </section>
       <section id="page-traffic" class="page" hidden>
         <div class="page-heading"><div><p class="eyebrow">АНАЛИТИКА</p><h1>Трафик</h1><p class="muted">Отчёты по протоколам, нодам и пользователям.</p></div><button id="export" class="button secondary">Скачать CSV ↓</button></div>
-        <form id="filters" class="card filters"><label>Начало периода<input id="filter-start" type="date" required></label><label>Конец периода<input id="filter-end" type="date" required></label><label>Протокол<select id="filter-protocol"><option value="">Все протоколы</option><option value="hysteria2">Hysteria2</option><option value="xray">VLESS / Xray</option></select></label><label>Нода<select id="filter-node"><option value="">Все ноды</option></select></label><label>Пользователь<input id="filter-user" placeholder="Все пользователи" maxlength="34"></label><button class="primary">Применить</button></form>
+        <form id="filters" class="card filters"><label>Начало периода<input id="filter-start" type="date" required></label><label>Конец периода<input id="filter-end" type="date" required></label><label>Протокол<select id="filter-protocol"><option value="">Все протоколы</option><option value="hysteria2">Hysteria2</option><option value="xray">VLESS / Xray</option></select></label><label>Нода<select id="filter-node"><option value="">Все ноды</option></select></label><label>Тег группы<select id="filter-tag"><option value="">Все теги</option></select></label><label>Пользователь<input id="filter-user" type="search" list="user-suggestions" placeholder="Все пользователи" autocomplete="off"><datalist id="user-suggestions"></datalist><span id="user-picker-status" class="small muted" role="status"></span></label><button class="primary">Применить</button></form>
+        <p class="small muted">Тег отбирает текущий состав группы. История трафика остаётся при сбросе лимита.</p><div id="report-summary" class="metric-grid"></div>
         <p id="traffic-status" class="small muted" role="status"></p>
-        <article class="card chart-card"><div class="card-heading"><h2 id="traffic-total">Трафик за период</h2><div class="legend"><span><i class="hy"></i>Hysteria2</span><span><i class="xr"></i>VLESS / Xray</span></div></div><div id="traffic-chart" class="chart"></div><p class="small muted">Группировка по часу начисления. В штатной истории Xray направления объединены.</p></article>
+        <article class="card chart-card"><div class="card-heading"><h2 id="traffic-total">Трафик за период</h2><div class="legend"><span><i class="hy"></i>Hysteria2</span><span><i class="xr"></i>VLESS / Xray</span></div></div><div id="traffic-chart" class="chart"></div><p id="traffic-coverage" class="small muted"></p><p class="small muted">Группировка по часу начисления. В штатной истории Xray направления объединены.</p></article>
         <article class="card"><div class="card-heading"><h2>По пользователям</h2><p class="small muted">По убыванию объёма</p></div><div id="traffic-users" class="table-wrap"></div></article>
         <details class="card"><summary>Таблица по часам и нодам</summary><div id="traffic-rows" class="table-wrap"></div></details>
+        <article class="card"><h2>По нодам</h2><div id="traffic-by-node" class="table-wrap"></div></article>
       </section>
-      <section id="page-events" class="page" hidden><div class="page-heading"><div><p class="eyebrow">ДИАГНОСТИКА</p><h1>События и ошибки</h1><p class="muted">Сбои учёта, связь с нодами и восстановление работы.</p></div><label class="check"><input id="events-open" type="checkbox" checked> Только открытые</label></div><article class="card"><div id="events-table" class="table-wrap"></div></article></section>
+      <section id="page-events" class="page" hidden><div class="page-heading"><div><p class="eyebrow">ДИАГНОСТИКА</p><h1>События и ошибки</h1><p class="muted">Откройте событие: причина, влияние и шаги проверки.</p></div><label class="check"><input id="events-open" type="checkbox" checked> Только нерешённые</label></div><p class="help card">«Новое» — требует разбора. «В работе» — администратор взял проблему на себя. «Восстановлено» — нода подтвердила исправное состояние. Отметка «В работе» не отключает сигнал и не исправляет сервер.</p><article class="card"><div id="events-table" class="table-wrap"></div></article></section>
       <section id="page-nodes" class="page" hidden><div class="page-heading"><div><p class="eyebrow">ИНФРАСТРУКТУРА</p><h1>Ноды</h1><p class="muted">Hysteria2 и VLESS в одном рабочем пространстве.</p></div><a class="button primary" href="#deploy">＋ Добавить ноду</a></div><div id="nodes-grid" class="nodes-grid"></div></section>
       <section id="page-deploy" class="page" hidden>
         <a class="text-link" href="#nodes">← К списку нод</a><div class="page-heading"><div><p class="eyebrow">НОВЫЙ СЕРВЕР</p><h1>Добавить ноду</h1><p class="muted">Укажите доступ. Панель проверит сервер и подготовит установку.</p></div></div>
@@ -76,5 +131,9 @@
     <footer>Rime <span>·</span> Управление VPN-инфраструктурой <span>·</span> Данные сервера · UTC</footer>
   </div>
 </div>
+<dialog id="user-dialog" aria-labelledby="user-dialog-title"><form id="user-form"><header class="card-heading"><h2 id="user-dialog-title">Пользователь</h2><button type="button" class="quiet dialog-close" aria-label="Закрыть">×</button></header><div class="form-grid"><label>Имя пользователя<input id="edit-username" required pattern="[a-z0-9_]{3,32}" maxlength="32"></label><label>Статус<select id="edit-status"><option value="active">Активен</option><option value="disabled">Отключён</option></select></label><label>Лимит, GiB<input id="edit-limit" type="number" min="0" step="any" placeholder="Без лимита"></label><label>Действует до (UTC)<input id="edit-expire" type="date"></label><label class="wide">Теги группы<input id="edit-tags" placeholder="Семья, друзья, команда" maxlength="820"><span class="small muted">Через запятую. По тегам можно искать и строить отчёты.</span></label><fieldset class="wide"><legend>Доступ к нодам</legend><label class="check"><input id="edit-all-nodes" type="checkbox" checked> Все ноды, включая добавленные позднее</label><div id="edit-nodes" class="node-choices" hidden></div><p class="small muted">При выборе отдельных нод подписка покажет только их адреса. Для старых VLESS-нод свяжите адреса подписки с нодой в её настройках. Ограничения действуют для новых соединений; уже открытые сессии Xray могут жить до разрыва.</p></fieldset><label class="wide">Примечание<textarea id="edit-note" rows="3" maxlength="500"></textarea></label></div><div id="user-subscription" class="subscription-box" hidden><label>Подписка<input id="subscription-url" readonly></label><button type="button" id="copy-subscription" class="secondary">Скопировать</button></div><p id="user-form-error" class="error" role="alert"></p><div class="form-actions"><button type="button" class="quiet dialog-close">Отмена</button><button id="user-save" class="primary">Сохранить</button></div></form></dialog>
+<dialog id="event-dialog" aria-labelledby="event-title"><header class="card-heading"><h2 id="event-title">Событие</h2><button type="button" class="quiet dialog-close" aria-label="Закрыть">×</button></header><div id="event-details"></div><form id="event-action"><label>Комментарий<textarea id="event-note" rows="3" maxlength="1000" placeholder="Что проверили, что нужно сделать"></textarea></label><p id="event-action-status" role="status"></p><div class="form-actions"><button id="event-check" type="button" class="secondary">Проверить ноду сейчас</button><button type="button" class="quiet dialog-close">Закрыть</button><button class="primary">Взять в работу / сохранить</button></div></form></dialog>
+<dialog id="connections-dialog" aria-labelledby="connections-title"><header class="card-heading"><h2 id="connections-title">Подключения</h2><button type="button" class="quiet dialog-close" aria-label="Закрыть">×</button></header><p id="connections-description" class="muted"></p><div id="connections-summary" class="metrics"></div><div id="connections-groups"></div><p id="connections-note" class="small muted"></p><div class="form-actions"><button type="button" class="quiet dialog-close">Закрыть</button><button id="connections-refresh" type="button" class="secondary">Обновить срез</button></div></dialog>
+<dialog id="delete-node-dialog" aria-labelledby="delete-node-title"><form id="delete-node-form"><header class="card-heading"><h2 id="delete-node-title">Удаление ноды из Rime</h2><button type="button" class="quiet dialog-close" aria-label="Закрыть">×</button></header><p id="delete-node-target"></p><h3>Будет удалено</h3><ul id="delete-node-effects"></ul><h3>Останется</h3><ul id="delete-node-retained"></ul><p id="delete-node-counts" class="muted"></p><label>Введите точное имя ноды<input id="delete-node-name" autocomplete="off" required></label><label class="check"><input id="delete-node-ack" type="checkbox" required> Подтверждаю удаление данных из панели. Очистка удалённых служб, DNS и резервных копий — отдельные действия.</label><p id="delete-node-error" class="error" role="alert"></p><div class="form-actions"><button type="button" class="quiet dialog-close">Отмена</button><button id="delete-node-confirm" class="danger" disabled>Удалить из панели</button></div></form></dialog>
 </body>
 </html>

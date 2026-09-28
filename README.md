@@ -1,4 +1,4 @@
-﻿# Rime
+# Rime
 
 **VPN infrastructure management**
 
@@ -7,14 +7,17 @@ SSH node deployment. Rime is a fork of Marzban **0.8.4**.
 
 ![Rime](docs/brand/rime.svg)
 
-**0.2.0-rc1: release candidate for isolated testing and a controlled pilot.**
-Production migration has not been performed.
+**0.2.0-rc6: release candidate for isolated testing and a controlled pilot.**
+Controlled production rollout and rollback rehearsals have been completed.
+Each installation still requires its own backup, compatibility checks and pilot.
 
 ## Features
 
 - Shared user traffic and quotas across Xray and Hysteria2.
+- Per-node traffic allowances, scheduled resets and warning/stop-access modes.
 - Durable Hy2 journals, retry-safe accounting, drained sessions before resets.
-- Hourly reports, CSV, node status and error events.
+- Unified console, user tags and all-node or selected-node access.
+- Filtered hourly reports, CSV, node monitoring/history and incident workflow.
 - SSH deployment wizard with preflight, fingerprint checks and rollback.
 - Rime identity on login, dashboard, infrastructure, subscription pages and icons.
 - Existing subscription routes and user identities retained.
@@ -32,15 +35,14 @@ access. Create an admin with `marzban-cli admin create --sudo` (compatibility na
 
 | Area | Path |
 |---|---|
-| Users and subscriptions | `/dashboard/` |
-| Traffic, events, nodes, deployment | `/fleet` |
+| Unified console: users, reports, monitoring, nodes | `/fleet` |
+| Compatibility redirect to Users | `/dashboard/` |
 | API docs, if enabled | `/docs` |
 
-Both sections use the same administrator accounts and currently require separate
-login sessions. Infrastructure requires a sudo admin. Set `RIME_FLEET_CONFIG` to
+The console uses one login session and requires a sudo admin. Set `RIME_FLEET_CONFIG` to
 a private JSON file for Hy2 and provisioning; `HY2_PANEL_CONFIG` remains an alias.
 
-Read [operations/migration](docs/OPERATIONS.md), [testing](docs/TESTING.md),
+Read [console workflow](docs/CONSOLE.md), [operations/migration](docs/OPERATIONS.md), [node quotas](docs/NODE_QUOTAS.md), [testing](docs/TESTING.md),
 [brand guidelines](docs/brand/README.md), and [attribution](NOTICE.md).
 
 ## Limits
