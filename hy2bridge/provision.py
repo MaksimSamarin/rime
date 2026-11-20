@@ -452,7 +452,7 @@ class Provisioner:
             agent={'panel_url':self.settings['panel_url'].rstrip('/')+'/api/hy2/nodes/'+job,
                 'node_token':token,'stats_url':'http://127.0.0.1:19999','stats_secret':secrets.token_urlsafe(48),
                 'auth_port':18888,'spool':'/state/spool.db','pid_file':'/state/hysteria.pid',
-                'interval':1,'policy_ttl':5,'durable':True,'traffic_wal':'/state/traffic.wal','core_version':'2.12.3-fleet.1'}
+                'interval':5,'http_timeout':10,'policy_ttl':5,'durable':True,'traffic_wal':'/state/traffic.wal','core_version':'2.12.3-fleet.1'}
             files['agent.json']=json.dumps(agent)
             if self.settings.get('panel_ca_file'):
                 files['panel-ca.pem']=Path(self.settings['panel_ca_file']).read_text()

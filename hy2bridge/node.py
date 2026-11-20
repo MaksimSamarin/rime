@@ -22,7 +22,8 @@ LOG = logging.getLogger('hy2bridge')
 
 
 class HTTP:
-    def __init__(self,ca_file=None):
+    def __init__(self,ca_file=None,timeout=10):
+        self.timeout=timeout
         class NoRedirect(urllib.request.HTTPRedirectHandler):
             def redirect_request(self,req,fp,code,msg,headers,newurl):return None
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}),NoRedirect(),
@@ -32,7 +33,7 @@ class HTTP:
         request = urllib.request.Request(url,
             data=json.dumps(data).encode() if data is not None else None,
             headers={'Authorization': ('Bearer ' if bearer else '')+token,'Content-Type':'application/json'})
-        with self.opener.open(request,timeout=2) as response:
+        with self.opener.open(request,timeout=self.timeout) as response:
             raw = response.read(4*1024*1024+1)
             if len(raw)>4*1024*1024:
                 raise ValueError('Response too large')
@@ -49,7 +50,7 @@ class Agent:
                 raise ValueError('Remote endpoints must use verified HTTPS')
         if config.get('auth_host','127.0.0.1') != '127.0.0.1':
             raise ValueError('Local auth endpoint must bind loopback')
-        self.http = HTTP(config.get('panel_ca'))
+        self.http = HTTP(config.get('panel_ca'),float(config.get('http_timeout',10)))
         self.spool = Spool(config['spool'])
         self.policy = LocalPolicy(config['spool'])
         self.charged = self.spool.charged()
@@ -209,7 +210,7 @@ class Agent:
     def run(self):
         while not self.stop.is_set():
             self.cycle()
-            self.stop.wait(self.config.get('interval',1))
+            self.stop.wait(self.config.get('interval',5))
 
     def handler(self):
         agent=self
