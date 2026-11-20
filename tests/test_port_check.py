@@ -8,6 +8,13 @@ from unittest.mock import patch
 from hy2bridge.port_check import port_checks
 
 
+def free_tcp_port():
+    # Unprivileged port: CI runners cannot bind ports below 1024.
+    with socket.socket() as probe:
+        probe.bind(('0.0.0.0', 0))
+        return probe.getsockname()[1]
+
+
 class PortChecksTests(unittest.TestCase):
     def docker(self, bindings):
         containers = [{'Name': '/' + name, 'HostConfig': {'PortBindings': ports}} for name, ports in bindings.items()]
@@ -25,7 +32,8 @@ class PortChecksTests(unittest.TestCase):
         self.assertIn('vless', checks[0]['message'])
 
     def test_hysteria_udp_does_not_block_https_tcp(self):
-        checks = self.check({'hy2': {'24443/udp': [{'HostPort': '443'}]}}, [(443, 'tcp')])
+        port = free_tcp_port()
+        checks = self.check({'hy2': {'24443/udp': [{'HostPort': str(port)}]}}, [(port, 'tcp')])
         self.assertTrue(checks[0]['passed'])
 
     def test_cleanup_cannot_hide_foreign_owner_on_same_port(self):
@@ -34,7 +42,8 @@ class PortChecksTests(unittest.TestCase):
         self.assertFalse(checks[0]['passed'])
 
     def test_only_selected_proxy_is_exempted_for_replacement(self):
-        checks = self.check({'old-proxy': {'8443/tcp': [{'HostPort': '443'}]}}, [(443, 'tcp')],
+        port = free_tcp_port()
+        checks = self.check({'old-proxy': {'8443/tcp': [{'HostPort': str(port)}]}}, [(port, 'tcp')],
                             ignored_containers=['old-proxy'])
         self.assertTrue(checks[0]['passed'])
 
