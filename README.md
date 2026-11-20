@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version 0.9.0" src="https://img.shields.io/badge/version-0.9.0-7dd3fc?style=flat-square">
+  <img alt="Version 0.9.1" src="https://img.shields.io/badge/version-0.9.1-7dd3fc?style=flat-square">
   <img alt="License AGPL-3.0" src="https://img.shields.io/badge/license-AGPL--3.0-0369a1?style=flat-square">
   <img alt="Xray 26.6.1" src="https://img.shields.io/badge/Xray-26.6.1-111923?style=flat-square">
   <img alt="Hysteria2" src="https://img.shields.io/badge/Hysteria2-supported-111923?style=flat-square">
@@ -153,7 +153,7 @@ cloned directory and use them instead of `--build` in step 3:
 ```sh
 sha256sum -c SHA256SUMS
 docker load -i rime-linux-amd64.tar.gz
-docker tag rime:0.9.0 rime:current
+docker tag rime:0.9.1 rime:current
 docker compose up -d
 ```
 
@@ -188,7 +188,7 @@ Follow [docs/OPERATIONS.md](docs/OPERATIONS.md) before switching live traffic.
 | [Resource observers](docs/RESOURCE_OBSERVERS.md) and [traffic semantics](docs/TRAFFIC_AND_CONNECTIONS.md) | What each metric means and where it comes from |
 | [Testing](docs/TESTING.md) | Closed acceptance checks used for releases |
 | [CLI](cli/README.md) and [contributing](CONTRIBUTING.md) | Command-line tools and how to send changes |
-| [Release notes 0.9.0](docs/RELEASE-0.9.0.md) | What is new in this version |
+| [Release notes 0.9.1](docs/RELEASE-0.9.1.md) and [0.9.0](docs/RELEASE-0.9.0.md) | What changed in recent versions |
 
 ## Limits
 

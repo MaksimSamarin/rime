@@ -48,3 +48,20 @@ class TransportTests(unittest.TestCase):
                 self.assertNotIn('/leak',reached)
                 with self.assertRaises(urllib.error.URLError):trusted.request(url.replace('localhost','127.0.0.1'),'synthetic-token')
             finally:server.shutdown();server.server_close();thread.join()
+
+    def test_slow_panel_response_within_configured_timeout_is_accepted(self):
+        import time
+        class Slow(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                time.sleep(2.5)
+                self.send_response(200);self.end_headers();self.wfile.write(b'{"ok":true}')
+            def log_message(self,*args):pass
+        server=http.server.ThreadingHTTPServer(('127.0.0.1',0),Slow)
+        thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+        try:
+            url=f'http://127.0.0.1:{server.server_port}'
+            # The default tolerates a response slower than the former two-second limit.
+            self.assertEqual(HTTP().timeout,10)
+            self.assertTrue(HTTP().request(url,'synthetic-token')['ok'])
+            with self.assertRaises((TimeoutError,urllib.error.URLError)):HTTP(timeout=1).request(url,'synthetic-token')
+        finally:server.shutdown();server.server_close();thread.join()
