@@ -109,7 +109,7 @@ def get_core_config(admin: Admin = Depends(Admin.check_sudo_admin)) -> dict:
 
 @router.put("/core/config", responses={403: responses._403})
 def modify_core_config(
-    payload: dict, admin: Admin = Depends(Admin.check_sudo_admin)
+    payload: dict, restart_nodes: bool = True, admin: Admin = Depends(Admin.check_sudo_admin)
 ) -> dict:
     """Modify the core configuration and restart the core."""
     try:
@@ -123,9 +123,10 @@ def modify_core_config(
 
     startup_config = xray.config.include_db_users()
     xray.core.restart(startup_config)
-    for node_id, node in list(xray.nodes.items()):
-        if node.connected:
-            xray.operations.restart_node(node_id, startup_config)
+    if restart_nodes:
+        for node_id, node in list(xray.nodes.items()):
+            if node.connected:
+                xray.operations.restart_node(node_id, startup_config)
 
     xray.hosts.update()
 

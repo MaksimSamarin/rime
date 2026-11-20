@@ -1,9 +1,7 @@
-from random import randint
 from typing import TYPE_CHECKING, Dict, Sequence
 
 from app.models.proxy import ProxyHostSecurity
 from app.utils.store import DictStorage
-from app.utils.system import check_port
 from app.xray import operations
 from app.xray.config import XRayConfig
 from app.xray.core import XRayCore
@@ -15,16 +13,8 @@ from xray_api import exceptions as exc
 
 core = XRayCore(XRAY_EXECUTABLE_PATH, XRAY_ASSETS_PATH)
 
-# Search for a free API port
-try:
-    for api_port in range(randint(10000, 60000), 65536):
-        if not check_port(api_port):
-            break
-finally:
-    config = XRayConfig(XRAY_JSON, api_port=api_port)
-    del api_port
-
-api = XRayAPI(config.api_host, config.api_port)
+config = XRayConfig(XRAY_JSON)
+api = XRayAPI(config.api_host, config.api_port, unix_socket=config.api_host)
 
 nodes: Dict[int, XRayNode] = {}
 

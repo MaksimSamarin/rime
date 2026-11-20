@@ -1,4 +1,4 @@
-"""Own a dedicated Hysteria process and agent; fail closed on loss of control.
+"""Own a dedicated Hysteria process and recover its local agent independently.
 
 Never attaches to an existing server process. An orchestration service may restart
 this entire unit after failure. A node-wide outage disconnects all users on that
@@ -57,20 +57,17 @@ def main():
             agent=subprocess.Popen([sys.executable,'-m','hy2bridge.node','--config',args.node_config],preexec_fn=parent_death_signal)
             children.append(agent)
             Path(cfg['pid_file']+'.agent').write_text(str(agent.pid))
-            last_good=time.monotonic()
-            http=HTTP()
             while not stopping:
-                if any(c.poll() is not None for c in children):
-                    print('Control process exited; stopping the owned Hysteria node',flush=True)
+                if hy.poll() is not None:
+                    print('Hysteria exited; node service must recover',flush=True)
                     return 1
-                try:
-                    if http.request(f"http://127.0.0.1:{cfg['auth_port']}/health",'')['fresh']:
-                        last_good=time.monotonic()
-                except Exception:
-                    pass
-                if time.monotonic()-last_good>args.grace:
-                    print('Control lease expired; stopping the owned Hysteria node',flush=True)
-                    return 1
+                if agent.poll() is not None:
+                    agent.wait()
+                    print('Recovering local authorization agent; Hysteria remains running',flush=True)
+                    agent=subprocess.Popen([sys.executable,'-m','hy2bridge.node','--config',args.node_config],preexec_fn=parent_death_signal)
+                    children[1]=agent
+                    Path(cfg['pid_file']+'.agent').write_text(str(agent.pid))
+                    time.sleep(1)
                 time.sleep(.2)
             return 0
         finally:

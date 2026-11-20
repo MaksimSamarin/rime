@@ -88,12 +88,13 @@ def generate_outline_subscription(
 
 def generate_v2ray_json_subscription(
         proxies: dict, inbounds: dict, extra_data: dict, reverse: bool,
+        hosts=None, inbound_config=None,
 ) -> str:
     conf = V2rayJsonConfig()
 
     format_variables = setup_format_variables(extra_data)
     return process_inbounds_and_tags(
-        inbounds, proxies, format_variables, conf=conf, reverse=reverse
+        inbounds, proxies, format_variables, conf=conf, reverse=reverse, hosts=hosts, inbound_config=inbound_config
     )
 
 
@@ -242,13 +243,15 @@ def process_inbounds_and_tags(
             OutlineConfiguration
         ],
         reverse=False,
+        hosts=None, inbound_config=None,
 ) -> Union[List, str]:
     _inbounds = []
     for protocol, tags in inbounds.items():
         for tag in tags:
             _inbounds.append((protocol, [tag]))
+    source_config=xray.config if inbound_config is None else inbound_config
     index_dict = {proxy: index for index, proxy in enumerate(
-        xray.config.inbounds_by_tag.keys())}
+        source_config.inbounds_by_tag.keys())}
     inbounds = sorted(
         _inbounds, key=lambda x: index_dict.get(x[1][0], float('inf')))
 
@@ -259,16 +262,19 @@ def process_inbounds_and_tags(
 
         format_variables.update({"PROTOCOL": protocol.name})
         for tag in tags:
-            inbound = xray.config.inbounds_by_tag.get(tag)
+            inbound = source_config.inbounds_by_tag.get(tag)
             if not inbound:
                 continue
 
             format_variables.update({"TRANSPORT": inbound["network"]})
             host_inbound = inbound.copy()
-            for host in xray.hosts.get(tag, []):
+            for host in (xray.hosts if hosts is None else hosts).get(tag, []):
                 from hy2bridge.access import host_allowed
                 if not host_allowed(format_variables.get('USERNAME'), host.get('id')):
                     continue
+                if hosts is None:
+                    from hy2bridge.relay_routes import host as tunnel_host
+                    host = tunnel_host(host, inbound)
                 sni = ""
                 sni_list = host["sni"] or inbound["sni"]
                 if sni_list:
@@ -276,7 +282,7 @@ def process_inbounds_and_tags(
                     sni = random.choice(sni_list).replace("*", salt)
 
                 if sids := inbound.get("sids"):
-                    inbound["sid"] = random.choice(sids)
+                    host_inbound["sid"] = random.choice(sids)
 
                 req_host = ""
                 req_host_list = host["host"] or inbound["host"]

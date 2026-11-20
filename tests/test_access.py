@@ -36,6 +36,12 @@ class AccessTests(unittest.TestCase):
         self.access.save(1,['private'],['n1'])
         with connect(self.path) as db:db.execute("UPDATE users SET created_at='2026-02-01',username='bob' WHERE id=1")
         self.assertEqual(self.access.metadata(1),{'tags':[],'nodes':None})
+        self.assertEqual(self.access.metadata_many([1]),{})
+
+    def test_batch_metadata_has_the_same_identity_and_access_rules(self):
+        self.access.save(1,['team'],['n1'])
+        self.assertEqual(self.access.metadata_many([1]),{1:self.access.metadata(1)})
+        self.assertEqual(self.access.metadata_many([]),{})
 
     def test_hy2_links_and_native_host_filter_are_fail_closed(self):
         with self.store.connection(write=True) as db:

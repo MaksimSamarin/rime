@@ -1,7 +1,7 @@
 services:
   rime:
     build: .
-    image: rime:0.2.0-rc6
+    image: rime:current
     restart: unless-stopped
     env_file: .env
     network_mode: host

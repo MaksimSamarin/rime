@@ -31,13 +31,27 @@ TOKEN='synthetic-node-token-0000000000000001'
 XRAY_BINARY=os.environ.get('XRAY_TEST_BINARY','/lab/bin/xray')
 ENV=dict(os.environ, PYTHONPATH=str(ROOT/'source')+':/code',
     SQLALCHEMY_DATABASE_URL='sqlite:///'+str(STATE/'db.sqlite3'),
-    XRAY_JSON=str(STATE/'xray.json'),XRAY_EXECUTABLE_PATH=XRAY_BINARY,
+    XRAY_JSON=str(STATE/'xray.json'),XRAY_EXECUTABLE_PATH=os.environ.get('XRAY_HUB_TEST_BINARY',
+        '/opt/rime-hub/xray' if Path('/opt/rime-hub/xray').is_file() else '/opt/rime-probe/xray'),
     SUDO_USERNAME='labadmin',SUDO_PASSWORD='Synthetic-lab-password-2026',
     UVICORN_HOST='127.0.0.1',UVICORN_PORT='18800',
     JOB_RECORD_USER_USAGES_INTERVAL='1',JOB_REVIEW_USERS_INTERVAL='1',
     JOB_RECORD_NODE_USAGES_INTERVAL='1',
     HY2_PANEL_CONFIG=str(STATE/'panel.json'),NO_PROXY='*',no_proxy='*',
     HTTP_PROXY='',HTTPS_PROXY='',ALL_PROXY='',http_proxy='',https_proxy='',all_proxy='')
+
+
+def public_origin():
+    """Use a documentation IPv4 in this isolated namespace, never a real route."""
+    if not Path('/.dockerenv').is_file():
+        raise RuntimeError('The payload fixture requires a closed Docker namespace')
+    import fcntl,struct
+    address='203.0.113.42'
+    with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as control:
+        value=struct.pack('16sH2s4s8s',b'lo:1',socket.AF_INET,b'\0'*2,
+                          socket.inet_aton(address),b'\0'*8)
+        fcntl.ioctl(control.fileno(),0x8916,value)
+    return address
 
 
 def check(name, condition, **detail):
@@ -345,7 +359,13 @@ def main():
     check('quota_disconnects_all_three_hy2_sessions',len(blocked)==3,
           elapsed_seconds=round(time.monotonic()-quota_started,3),
           observed_overrun_bytes=max(0,request('/api/user/alice',token=admin)['used_traffic']-(used+4000)))
-    check('quota_blocks_udp_and_new_connections',not udp(18201) and not fresh(18101) and not fresh(18110))
+    denial={}
+    def new_paths_blocked():
+        denial.update(udp=not udp(18201),hy2=not fresh(18101),vless=not fresh(18110))
+        return all(denial.values())
+    try:wait(new_paths_blocked,20)
+    except TimeoutError:check('quota_blocks_udp_and_new_connections',False,paths=denial)
+    check('quota_blocks_udp_and_new_connections',all(denial.values()),paths=denial)
     check('other_user_existing_connection_survives',echo(b) and udp(18204))
     request('/api/user/alice/reset',method='POST',token=admin)
     request('/api/user/alice',{'data_limit':0,'status':'active'},method='PUT',token=admin)
@@ -383,10 +403,23 @@ def main():
     ag1=start('agent1-buffer-recovered',[sys.executable,'-m','hy2bridge.node','--config',str(STATE/'agent1.json')])
     wait(lambda:request('/api/user/bob',token=admin)['used_traffic']==used+4096)
     check('collector_outage_catches_up_exact_bytes',request('/api/user/bob',token=admin)['used_traffic']==used+4096)
-    # Panel outage: no indefinite cached authorization; existing sessions are reconciled.
-    stop(pp);time.sleep(3)
-    wait(lambda:not echo(b),10)
-    check('panel_outage_expires_cached_auth_and_kicks',not fresh(18104))
+    # Loss of control must not revoke known access or terminate the VPN engine.
+    expires=int(time.time())+10
+    request('/api/user/alice',{'status':'active','expire':expires},method='PUT',token=admin)
+    def expiry_delivered():
+        with sqlite3.connect(STATE/'spool1.db') as db:
+            value=json.loads(db.execute('SELECT data FROM local_policy WHERE id=1').fetchone()[0])
+        return value['rules'].get(A,{}).get('expire')==expires
+    wait(expiry_delivered)
+    stop(pp);time.sleep(11)
+    check('panel_outage_existing_tcp_udp_survive',echo(b) and udp(18204))
+    hyclient('b-offline-new',B,14443,18116);wait(lambda:fresh(18116))
+    check('panel_outage_new_known_credentials_work',fresh(18116))
+    check('offline_expiration_and_unknown_key_denied',not request('http://127.0.0.1:18888/auth',{'auth':A})['ok'] and not request('http://127.0.0.1:18888/auth',{'auth':'unknown'})['ok'])
+    stop(ag1)
+    ag1=start('agent1-offline-reboot',[sys.executable,'-m','hy2bridge.node','--config',str(STATE/'agent1.json')])
+    wait(lambda:request('http://127.0.0.1:18888/health')['ready'])
+    check('offline_agent_restart_preserves_tcp_udp_and_policy',echo(b) and udp(18204) and fresh(18116))
     pp,admin=panel('panel-recovered')
     wait(lambda:request('http://127.0.0.1:18888/health')['fresh'])
     hyclient('b-recovered',B,14443,18107);wait(lambda:fresh(18107))
@@ -476,17 +509,16 @@ def main():
     supervisor=start('supervisor-1',args)
     wait(lambda:request('http://127.0.0.1:18890/health')['fresh'])
     hyclient('b-supervised',B,14445,18112);wait(lambda:fresh(18112));owned=conn(18112)
-    os.kill(int((STATE/'hy3.pid.agent').read_text()),signal.SIGKILL)
-    wait(lambda:supervisor.poll() is not None)
-    check('collector_crash_stops_owned_hysteria',supervisor.returncode==1 and not echo(owned) and echo(control))
-    supervisor=start('supervisor-2',args)
+    old_agent=int((STATE/'hy3.pid.agent').read_text());old_core=int((STATE/'hy3.pid').read_text())
+    os.kill(old_agent,signal.SIGKILL)
+    wait(lambda:int((STATE/'hy3.pid.agent').read_text())!=old_agent)
     wait(lambda:request('http://127.0.0.1:18890/health')['fresh'])
+    check('collector_crash_recovers_without_core_or_traffic_restart',supervisor.poll() is None and int((STATE/'hy3.pid').read_text())==old_core and echo(owned) and echo(control))
     hyclient('b-stats-outage',B,14445,18113);wait(lambda:fresh(18113));owned=conn(18113)
     outage['active']=True
-    wait(lambda:supervisor.poll() is not None,15)
-    check('stats_api_outage_stops_owned_hysteria',supervisor.returncode==1 and not echo(owned) and echo(control))
+    time.sleep(7)
+    check('stats_api_outage_keeps_known_traffic_and_engine',supervisor.poll() is None and echo(owned) and echo(control) and fresh(18113))
     outage['active']=False
-    supervisor=start('supervisor-3',args)
     wait(lambda:request('http://127.0.0.1:18890/health')['fresh'])
     hyclient('b-parent-death',B,14445,18114);wait(lambda:fresh(18114));owned=conn(18114)
     os.kill(supervisor.pid,signal.SIGKILL);supervisor.wait(timeout=3)
@@ -503,6 +535,7 @@ def main():
     wait(lambda:not echo(deleted))
     wait(lambda:request('http://127.0.0.1:18889/health')['fresh'])
     check('user_deletion_kicks_without_poisoning_other_users',not fresh(18115) and echo(control))
+    wait(lambda:any(r['username']=='charlie' for r in request('/api/hy2/report',token=admin)['usage']))
     check('deleted_user_audit_retained',any(r['username']=='charlie' for r in request('/api/hy2/report',token=admin)['usage']))
     final=request('/api/hy2/report',token=admin)
     fleet=request('/api/fleet/overview',token=admin)

@@ -11,7 +11,7 @@ from pathlib import Path
 from fastapi import Depends, Header, HTTPException
 from fastapi.responses import FileResponse, Response, HTMLResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, StrictInt, model_validator
+from pydantic import BaseModel, Field, StrictInt, StrictBool, model_validator
 
 from .store import Store, Conflict
 from .operations import Operations
@@ -23,6 +23,15 @@ from .periods import Periods
 class Counts(BaseModel):
     tx: Annotated[StrictInt, Field(ge=0, le=2**60)]
     rx: Annotated[StrictInt, Field(ge=0, le=2**60)]
+
+
+class ClientProbe(BaseModel):
+    checked_at: float = Field(ge=0,allow_inf_nan=False)
+    passed: StrictBool
+    target_ip: str = Field(min_length=2,max_length=45)
+    stage: Literal['payload','client','connect','configuration','route']
+    latency_ms: float | None = Field(default=None,ge=0,le=120000,allow_inf_nan=False)
+    error: str | None = Field(default=None,max_length=160)
 
 
 class Batch(BaseModel):
@@ -57,6 +66,7 @@ class ConnectionDetails(BaseModel):
 
 
 class Health(BaseModel):
+    management_policy_ack: dict | None = Field(default=None,max_length=3)
     error: Literal['accounting_failed','stats_unavailable','ledger_failed','control_expired','counter_reset'] | None = None
     uptime_seconds: Annotated[StrictInt,Field(ge=0)] = 0
     online_users: Annotated[StrictInt,Field(ge=0)] | None = None
@@ -97,7 +107,10 @@ class SSHAddress(BaseModel):
 
 
 class ProvisionRequest(SSHAddress):
-    name: str=Field(min_length=1,max_length=64)
+    move_node: str | None = Field(default=None,max_length=64,pattern=r'^[a-zA-Z0-9:_-]+$')
+    address: str | None = Field(default=None,max_length=45)
+    cleanup_job: str | None = Field(default=None,pattern=r'^[a-f0-9]{32}$')
+    name: str=Field(min_length=1,max_length=256)
     protocol: Literal['hysteria2','vless']
     vpn_port: Annotated[StrictInt,Field(ge=1,le=65535)]
     username: str=Field(min_length=1,max_length=64)
@@ -106,8 +119,14 @@ class ProvisionRequest(SSHAddress):
     key_passphrase: str=Field(default='',max_length=1024)
     fingerprint: str=Field(pattern=r'^SHA256:[A-Za-z0-9+/]{43}$')
     domain: str=Field(min_length=1,max_length=253)
-    certificate: str=Field(min_length=1,max_length=32768)
-    certificate_key: str=Field(min_length=1,max_length=16384)
+    certificate: str=Field(default='',max_length=32768)
+    certificate_key: str=Field(default='',max_length=16384)
+
+    @model_validator(mode='after')
+    def node_name_length(self):
+        if not self.move_node and len(self.name)>64:
+            raise ValueError('Название новой ноды не длиннее 64 символов')
+        return self
 
 
 class DeployRequest(BaseModel):
@@ -152,8 +171,14 @@ def install(app):
     from .meter import Meters
     meters=Meters(store,config.get('meters',[]))
     operations.meters=meters
+    from .reachability import Reachability
+    operations.reachability=Reachability(store,config.get('client_probes',[]))
+    from .http import FleetGZipMiddleware
+    app.add_middleware(FleetGZipMiddleware,minimum_size=1024,compresslevel=5)
     from app import scheduler
     scheduler.add_job(meters.check_health,'interval',seconds=10,id='rime_meter_health',replace_existing=True)
+    scheduler.add_job(operations.prune,'interval',hours=1,id='rime_diagnostic_retention',replace_existing=True,max_instances=1)
+    scheduler.add_job(operations.expire_checks,'interval',seconds=30,id='rime_check_timeouts',replace_existing=True,max_instances=1,coalesce=True)
     from . import quotas
     quotas.current=quotas.NodeQuotas(store)
     operations.quotas=quotas.current
@@ -167,8 +192,12 @@ def install(app):
     if config.get('safe_period_reset',False):periods.install()
     quotas.current.install(app)
     from app import xray
-    operations.native_probe=lambda node_id: (bool(xray.nodes[node_id].connected and xray.nodes[node_id].started)
-                                           if node_id in xray.nodes else None)
+    # HTTP handlers read observations; remote RPC belongs to the health worker.
+    def observed_native(node_id):
+        import time
+        value=getattr(xray.nodes.get(node_id),'observed_health',None)
+        return value[1] if value and time.monotonic()-value[0]<120 else None
+    operations.native_probe=observed_native
     local_state={'outage':None}
     import psutil
     from .telemetry import HostResources, PanelRuntime
@@ -191,16 +220,26 @@ def install(app):
     if not isinstance(tokens,dict) or any(not isinstance(v,str) or len(v) < 32 for v in tokens.values()) or len(set(tokens.values()))!=len(tokens):
         raise ValueError('Each Hy2 node must have a separate token of at least 32 characters')
     for node in tokens:
+        with store.connection() as db:
+            if db.execute('SELECT 1 FROM fleet_legacy_retired WHERE node=?',(node,)).fetchone():continue
         operations.ensure_node(node)
     def current_hy2_nodes():
         with store.connection() as db:
             managed={r['id'] for r in db.execute("SELECT id FROM fleet_managed WHERE protocol='hysteria2'")}
-        return set(tokens)|managed
+            retired={r['node'] for r in db.execute('SELECT node FROM fleet_legacy_retired')}
+        return (set(tokens)-retired)|managed
     periods.node_ids=current_hy2_nodes
 
+    def valid_node_credential(node,authorization,db):
+        if db.execute("SELECT 1 FROM fleet_managed WHERE id=? AND protocol='hysteria2'",(node,)).fetchone():
+            return registry.authorize(node,authorization,db)
+        if db.execute('SELECT 1 FROM fleet_legacy_retired WHERE node=?',(node,)).fetchone():return False
+        token=tokens.get(node)
+        return token is not None and hmac.compare_digest(authorization,'Bearer '+token)
+
     def authorize(node: str, authorization: str = Header(default='')):
-        token = tokens.get(node)
-        if not ((token is not None and hmac.compare_digest(authorization, 'Bearer ' + token)) or registry.authorize(node,authorization)):
+        with store.connection() as db:valid=valid_node_credential(node,authorization,db)
+        if not valid:
             raise HTTPException(401, 'Invalid node credential')
         return node
 
@@ -214,9 +253,12 @@ def install(app):
             raise HTTPException(409,str(e))
 
     @app.post('/api/hy2/nodes/{node}/usage', tags=['Hysteria2'])
-    def usage(batch: Batch, node: str = Depends(authorize)):
+    def usage(batch: Batch, node: str = Depends(authorize),authorization:str=Header(default='')):
+        def credential_guard(db,added):
+            if not valid_node_credential(node,authorization,db):
+                raise HTTPException(401,'Node credential changed')
         try:
-            return store.ingest(node,batch.model_dump())
+            return store.ingest(node,batch.model_dump(),commit_hook=credential_guard)
         except Conflict as e:
             raise HTTPException(409,str(e))
 
@@ -241,9 +283,15 @@ def install(app):
             raise HTTPException(422,'Connection metric does not match the node protocol')
         # Resource-only credentials cannot acknowledge traffic barriers, report
         # usage or claim that the legacy collector has durable accounting.
-        data=health.model_dump(exclude={'check','accounting_durable','kick_attempts','error','traffic_healthy','traffic_checked_at','traffic_latency_ms','traffic_error'})
+        data=health.model_dump(exclude={'check','accounting_durable','kick_attempts','error','traffic_healthy','traffic_checked_at','traffic_latency_ms','traffic_error','management_policy_ack'})
         data['resource_observer']=True
-        try:return operations.heartbeat(node,data)
+        try:
+            result=operations.heartbeat(node,data)
+            from .native_sources import current
+            if current is not None and node.startswith('xray:'):
+                policy=current.response(node,health.management_policy_ack)
+                if policy is not None:result['management_policy']=policy
+            return result
         except ValueError as error:raise HTTPException(409,str(error))
 
     @app.post('/api/fleet/meters/{node}/usage',tags=['Fleet'])
@@ -252,28 +300,43 @@ def install(app):
         try:return meters.ingest(node,batch.model_dump(include={'spool','seq','totals'}),batch.source_at,batch.source_epoch,batch.counter_started_at)
         except (Conflict,ValueError) as error:raise HTTPException(409,str(error))
 
+    @app.get('/api/fleet/meters/{node}/policy',tags=['Fleet'])
+    def legacy_policy(node:str,authorization:str=Header(default='')):
+        if not meters.authorize(node,authorization):raise HTTPException(401,'Invalid meter credential')
+        try:
+            result=store.policy(node)
+            return {k:v for k,v in result.items() if k!='barriers'}
+        except Conflict as error:raise HTTPException(409,str(error))
+
     @app.get('/api/fleet/overview',tags=['Fleet'])
     def overview(admin: Admin=Depends(Admin.check_sudo_admin)):
         nodes=operations.nodes()
-        return {'nodes':nodes,'events':operations.events(50),'generated_at':datetime.now(timezone.utc).isoformat(),
+        return {'nodes':nodes,'events':operations.events(250,nodes=nodes),'generated_at':datetime.now(timezone.utc).isoformat(),
                 'summary':{state:sum(n['state']==state for n in nodes) for state in ('healthy','degraded','offline','unknown')}}
+
+    @app.post('/api/fleet/client-probes/{probe}/{node}',tags=['Fleet'])
+    def client_probe(probe:str,node:str,data:ClientProbe,authorization:str=Header(default='')):
+        if not operations.reachability.authorize(probe,node,authorization):raise HTTPException(401,'Invalid client-probe credential')
+        try:return operations.reachability.ingest(probe,node,data.model_dump())
+        except ValueError as error:raise HTTPException(422,str(error))
 
     @app.get('/api/fleet/events',tags=['Fleet'])
     def events(admin: Admin=Depends(Admin.check_sudo_admin)):
         return operations.events(250)
 
-    def filtered_report(start,end,protocol,node,username,tag=None):
+    def filtered_report(start,end,protocol,node,username,tag=None,detail=True,group_by='protocol'):
         end=end or datetime.now(timezone.utc)
         start=start or end-timedelta(days=7)
         if start.tzinfo is None:start=start.replace(tzinfo=timezone.utc)
         if end.tzinfo is None:end=end.replace(tzinfo=timezone.utc)
-        try:return operations.traffic(start.astimezone(timezone.utc),end.astimezone(timezone.utc),protocol,node,username,tag)
+        try:return operations.traffic(start.astimezone(timezone.utc),end.astimezone(timezone.utc),protocol,node,username,tag,detail=detail,group_by=group_by)
         except ValueError as e:raise HTTPException(422,str(e))
 
     @app.get('/api/fleet/traffic',tags=['Fleet'])
     def traffic(start: datetime|None=None,end: datetime|None=None,protocol: Literal['hysteria2','xray']|None=None,
-                node: str|None=None,username: str|None=None,tag: str|None=None,admin: Admin=Depends(Admin.check_sudo_admin)):
-        return filtered_report(start,end,protocol,node,username,tag)
+                node: str|None=None,username: str|None=None,tag: str|None=None,detail:bool=True,
+                group_by:Literal['protocol','node','tag','user']='protocol',admin: Admin=Depends(Admin.check_sudo_admin)):
+        return filtered_report(start,end,protocol,node,username,tag,detail,group_by)
 
     @app.get('/api/fleet/traffic.csv',tags=['Fleet'])
     def export(start: datetime|None=None,end: datetime|None=None,protocol: Literal['hysteria2','xray']|None=None,
@@ -293,18 +356,73 @@ def install(app):
     if provision_settings.get('vless_template'):
         from app.db import GetDB,crud
         with GetDB() as db:provision_settings['vless_template']['client_certificate']=crud.get_tls_certificate(db).certificate
-    provision=Provisioner(store,provision_settings,*registry.callbacks(operations,provision_settings))
+    from .provision_probe import ProvisionProbe
+    provision_probe=ProvisionProbe(store,provision_settings,operations.reachability,xray)
+    provision=Provisioner(store,provision_settings,*registry.callbacks(operations,provision_settings),
+                          verify=provision_probe.run if provision_settings.get('probe_username') else None)
+    app.state.fleet_provisioner=provision
+    from .proxy_service import install as install_proxy
+    proxies=install_proxy(app,store,provision)
+    from . import native_trust
+    native_trust.current=native_trust.NativeTrust(store,proxies.recovery)
+    from . import native_sources
+    native_sources.current=native_sources.ManagementSources(store,provision_settings)
+    def capture_node(job,data,configuration,registration):
+        if data['protocol']=='vless':
+            from .recovery import vless_profile
+            template=provision_settings['vless_template']
+            certificates={template['certificate_path'].lstrip('/'):configuration['files']['cert.pem'],
+                          template['key_path'].lstrip('/'):configuration['files']['key.pem']}
+            vpn=vless_profile(dict(xray.config),[{'inbound_tag':template['inbound_tag'],'port':data['vpn_port']}],certificates)
+        else:
+            vpn={'protocol':'hysteria2','config':json.loads(configuration['files']['hysteria.json']),
+                 'certificate':configuration['files']['cert.pem'],'certificate_key':configuration['files']['key.pem']}
+        if registration.get('management_tls'):vpn['management_tls']=registration['management_tls']
+        if registration.get('management_auth'):
+            vpn['management_auth']=registration['management_auth']
+            vpn['management_protocol']=configuration.get('env',{}).get('SERVICE_PROTOCOL','rest')
+        proxies.recovery.remember_vpn(registration['node'],vpn)
+    provision.capture=capture_node
+    from .client_checks import install as install_client_checks
+    install_client_checks(app,store,provision_settings,operations.reachability,provision_probe.active_target)
+    if provision_settings.get('probe_username'):
+        scheduler.add_job(provision_probe.run_active,'interval',seconds=60,id='rime_managed_client_checks',
+                          replace_existing=True,max_instances=1,coalesce=True)
     from .lifecycle import Lifecycle,DeleteConflict
     lifecycle=Lifecycle(store);lifecycle.install_runtime(scheduler,xray,quotas.current,provision)
     app.state.node_lifecycle=lifecycle
+    from .transfer import NodeTransfer
+    transfer=NodeTransfer(provision,operations,provision_probe,lifecycle,recovery=proxies.recovery,proxies=proxies)
+    app.state.node_transfer=transfer
+    provision_probe.transfer=transfer
+    if provision_settings.get('relay_enabled',False):
+        from .relays import Relays
+        from .relay_api import install as install_relays
+        from . import relay_routes
+        relay_routes.current=Relays(provision,transfer,proxies)
+        operations.relays=relay_routes.current
+        proxies.relays=relay_routes.current
+        proxies.deletion.relays=relay_routes.current
+        install_relays(app,relay_routes.current)
+        scheduler.add_job(relay_routes.current.prune,'interval',hours=1,id='rime_relay_retention',replace_existing=True)
+        scheduler.add_job(relay_routes.current.check_active,'interval',seconds=60,id='rime_relay_payload_checks',replace_existing=True,max_instances=1,coalesce=True)
+        scheduler.add_job(relay_routes.current.changes.recover,'date',id='rime_relay_operation_recovery',replace_existing=True)
+        scheduler.add_job(relay_routes.current.changes.recover,'interval',seconds=60,id='rime_relay_operation_retries',replace_existing=True,max_instances=1,coalesce=True)
+    from .recovery_api import install as install_recovery
+    install_recovery(app,transfer)
     original_begin=periods.begin
     def guarded_begin(*args,**kwargs):
-        with lifecycle.guard:return original_begin(*args,**kwargs)
+        with lifecycle.guard:
+            with store.connection() as db:
+                if db.execute("SELECT 1 FROM fleet_node_transfers WHERE state='switched'").fetchone():
+                    raise Conflict('Сброс расхода отложен до завершения переноса ноды')
+            return original_begin(*args,**kwargs)
     periods.begin=guarded_begin
 
     @app.get('/api/fleet/nodes/{node}/delete-preview',tags=['Fleet'])
     def delete_preview(node:str,admin:Admin=Depends(Admin.check_sudo_admin)):
-        if node in tokens:raise HTTPException(409,'Нода задана статической конфигурацией: сначала перенесите её регистрацию в панель')
+        with store.connection() as db:retired=db.execute('SELECT 1 FROM fleet_legacy_retired WHERE node=?',(node,)).fetchone()
+        if node in tokens and not retired:raise HTTPException(409,'Нода задана статической конфигурацией: сначала перенесите её регистрацию в панель')
         try:result=lifecycle.plan(node)
         except DeleteConflict as error:raise HTTPException(409,str(error))
         if result is None:raise HTTPException(404,'Нода не найдена')
@@ -312,7 +430,8 @@ def install(app):
 
     @app.delete('/api/fleet/nodes/{node}',tags=['Fleet'])
     def delete_node(node:str,data:DeleteNodeRequest,admin:Admin=Depends(Admin.check_sudo_admin)):
-        if node in tokens:raise HTTPException(409,'Нода задана статической конфигурацией')
+        with store.connection() as db:retired=db.execute('SELECT 1 FROM fleet_legacy_retired WHERE node=?',(node,)).fetchone()
+        if node in tokens and not retired:raise HTTPException(409,'Нода задана статической конфигурацией')
         try:return lifecycle.delete(node,data.name,data.confirmation,data.acknowledge_remote_retained)
         except DeleteConflict as error:raise HTTPException(409,str(error))
     def provision_call(call,*args):
@@ -320,21 +439,33 @@ def install(app):
         except ProvisionError as e:raise HTTPException(409,str(e))
         except Exception:raise HTTPException(503,'Операция недоступна; проверьте конфигурацию установщика') from None
 
+    @app.get('/api/fleet/provision/options',tags=['Fleet'])
+    def provision_options(admin:Admin=Depends(Admin.check_sudo_admin)):
+        return provision.options()
+
     @app.post('/api/fleet/provision/host-key',tags=['Fleet'])
     def host_key(data:SSHAddress,admin:Admin=Depends(Admin.check_sudo_admin)):
         return provision_call(provision.scan,data.host,data.ssh_port)
 
     @app.post('/api/fleet/provision/preflight',tags=['Fleet'])
     def preflight(data:ProvisionRequest,admin:Admin=Depends(Admin.check_sudo_admin)):
-        return provision_call(provision.preflight,data.model_dump())
+        return provision_call(transfer.preflight if data.move_node else provision.preflight,data.model_dump())
+
+    @app.get('/api/fleet/provision/transfer/{node}',tags=['Fleet'])
+    def transfer_options(node:str,admin:Admin=Depends(Admin.check_sudo_admin)):
+        return provision_call(transfer.options_for,node)
 
     @app.post('/api/fleet/provision/deploy',tags=['Fleet'])
     def deploy(data:DeployRequest,admin:Admin=Depends(Admin.check_sudo_admin)):
-        return provision_call(provision.deploy,data.plan_id)
+        with provision.lock:
+            record=provision.plans.get(data.plan_id)
+            moving=bool(record and record['data'].get('move_node'))
+        return provision_call(transfer.deploy if moving else provision.deploy,data.plan_id)
 
     @app.get('/api/fleet/provision/jobs/{job}',tags=['Fleet'])
     def job(job:str,admin:Admin=Depends(Admin.check_sudo_admin)):
-        return provision_call(provision.job,job)
+        try:return provision.job(job)
+        except ProvisionError as error:raise HTTPException(404,str(error)) from None
 
     app.state.rime_installed = True
     web=Path(__file__).with_name('web')

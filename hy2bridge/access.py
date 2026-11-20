@@ -32,6 +32,14 @@ class Access:
         return {'tags': json.loads(row['tags']) if row else [],
                 'nodes': json.loads(row['nodes']) if row and row['nodes'] is not None else None}
 
+    def metadata_many(self, uids):
+        if not uids:return {}
+        with self.store.connection() as db:
+            rows=db.execute('''SELECT m.* FROM fleet_user_meta m JOIN users u
+                ON u.id=m.user_id AND u.created_at=m.user_created WHERE u.id IN ('''+','.join('?' for _ in uids)+')',uids)
+            return {r['user_id']:{'tags':json.loads(r['tags']),
+                    'nodes':json.loads(r['nodes']) if r['nodes'] is not None else None} for r in rows}
+
     def save(self, uid, tags, nodes):
         tags = sorted(set(t.strip() for t in tags if t.strip()), key=str.casefold)
         if len(tags)>20 or any(len(t)>40 for t in tags):raise ValueError('До 20 тегов, каждый не длиннее 40 символов')

@@ -62,6 +62,8 @@ class Store:
             if 'auth' not in {r['name'] for r in db.execute('PRAGMA table_info(hy2_hourly)')}:
                 raise RuntimeError('Older prototype ledger; explicit migration required')
             db.execute('CREATE INDEX IF NOT EXISTS hy2_hourly_time ON hy2_hourly(hour,node,username)')
+            db.execute('''CREATE TABLE IF NOT EXISTS hy2_policy_versions(
+                node TEXT PRIMARY KEY,version INTEGER NOT NULL,digest TEXT NOT NULL)''')
 
     @staticmethod
     def remember(db, users):
@@ -104,9 +106,19 @@ class Store:
                     if node in json.loads(row['targets']):barriers.append({'id':row['id'],'auths':auths})
             from .access import current
             from .quotas import blocked
-            if node and blocked(node,db):return {'allowed':[],'barriers':barriers,'node_quota_blocked':True}
-            return {'allowed': [auth for auth, user in users.items() if self.allowed(user) and auth not in paused
-                and (current is None or current.allows(user['id'],node,db))],'barriers':barriers}
+            quota_blocked=bool(node and blocked(node,db))
+            allowed=[auth for auth,user in users.items() if not quota_blocked and self.allowed(user) and auth not in paused
+                and (current is None or current.allows(user['id'],node,db))]
+            accounted={r['auth']:r['tx']+r['rx'] for r in db.execute('SELECT * FROM hy2_totals WHERE node=?',(node,))}
+            rules={auth:{'expire':users[auth]['expire'] or 0,
+                'remaining_bytes':max(0,users[auth]['data_limit']-users[auth]['used_traffic']) if users[auth]['data_limit'] else None,
+                'accounted_bytes':accounted.get(auth,0)} for auth in allowed}
+            result={'allowed':allowed,'rules':rules,'node_quota_blocked':quota_blocked}
+            digest=hashlib.sha256(json.dumps(result,sort_keys=True).encode()).hexdigest()
+            key=node or '';old=db.execute('SELECT * FROM hy2_policy_versions WHERE node=?',(key,)).fetchone()
+            version=(old['version']+(old['digest']!=digest)) if old else 1
+            db.execute('INSERT INTO hy2_policy_versions VALUES(?,?,?) ON CONFLICT(node) DO UPDATE SET version=excluded.version,digest=excluded.digest',(key,version,digest))
+            return {**result,'version':version,'barriers':barriers}
 
     def ingest(self, node, batch, commit_hook=None):
         spool, seq, totals = batch['spool'], batch['seq'], batch['totals']

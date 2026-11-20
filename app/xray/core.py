@@ -2,11 +2,13 @@ import atexit
 import re
 import subprocess
 import threading
+import time
 from collections import deque
 from contextlib import contextmanager
 
 from app import logger
 from app.xray.config import XRayConfig
+from app.xray.api_security import hub_api_endpoint
 from config import DEBUG
 
 
@@ -39,22 +41,28 @@ class XRayCore:
             return m.groups()[0]
 
     def get_x25519(self, private_key: str = None):
-        cmd = [self.executable_path, "x25519"]
+        from base64 import b64decode, urlsafe_b64encode
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
         if private_key:
-            cmd.extend(['-i', private_key])
-        output = subprocess.check_output(cmd, stderr=subprocess.STDOUT).decode('utf-8')
-        m = re.match(r'Private key: (.+)\nPublic key: (.+)', output)
-        if m:
-            private, public = m.groups()
-            return {
-                "private_key": private,
-                "public_key": public
-            }
+            try:
+                raw=b64decode(private_key+'='*(-len(private_key)%4),altchars=b'-_',validate=True)
+                key=X25519PrivateKey.from_private_bytes(raw)
+            except (ValueError,TypeError) as error:
+                raise ValueError('Invalid REALITY private key') from error
+        else:
+            key=X25519PrivateKey.generate()
+        private=key.private_bytes(serialization.Encoding.Raw,serialization.PrivateFormat.Raw,
+                                  serialization.NoEncryption())
+        public=key.public_key().public_bytes(serialization.Encoding.Raw,serialization.PublicFormat.Raw)
+        return {'private_key':urlsafe_b64encode(private).decode().rstrip('='),
+                'public_key':urlsafe_b64encode(public).decode().rstrip('=')}
 
     def __capture_process_logs(self):
+        process = self.process
         def capture_and_debug_log():
-            while self.process:
-                output = self.process.stdout.readline()
+            while process:
+                output = process.stdout.readline()
                 if output:
                     output = output.strip()
                     self._logs_buffer.append(output)
@@ -62,19 +70,19 @@ class XRayCore:
                         buf.append(output)
                     logger.debug(output)
 
-                elif not self.process or self.process.poll() is not None:
+                elif process.poll() is not None:
                     break
 
         def capture_only():
-            while self.process:
-                output = self.process.stdout.readline()
+            while process:
+                output = process.stdout.readline()
                 if output:
                     output = output.strip()
                     self._logs_buffer.append(output)
                     for buf in list(self._temp_log_buffers.values()):
                         buf.append(output)
 
-                elif not self.process or self.process.poll() is not None:
+                elif process.poll() is not None:
                     break
 
         if DEBUG:
@@ -109,6 +117,8 @@ class XRayCore:
         if self.started is True:
             raise RuntimeError("Xray is started already")
 
+        hub_api_endpoint().prepare()
+
         if config.get('log', {}).get('logLevel') in ('none', 'error'):
             config['log']['logLevel'] = 'warning'
 
@@ -129,6 +139,14 @@ class XRayCore:
         self.process.stdin.write(config.to_json())
         self.process.stdin.flush()
         self.process.stdin.close()
+        # Older cores can accept a Unix-listener configuration but start no
+        # listener. Never report success with an unavailable protected API.
+        deadline = time.monotonic()+5
+        while not hub_api_endpoint().path.exists():
+            if self.process.poll() is not None or time.monotonic()>=deadline:
+                self.stop()
+                raise RuntimeError('The protected Unix API did not start; use the qualified Xray runtime')
+            time.sleep(.05)
         logger.warning(f"Xray core {self.version} started")
 
         self.__capture_process_logs()
@@ -141,8 +159,15 @@ class XRayCore:
         if not self.started:
             return
 
-        self.process.terminate()
-        self.process = None
+        process = self.process
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+        if self.process is process:
+            self.process = None
         logger.warning("Xray core stopped")
 
         # execute on stop functions

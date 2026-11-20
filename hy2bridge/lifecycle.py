@@ -58,9 +58,17 @@ class Lifecycle:
             for barrier in db.execute('SELECT targets FROM fleet_barriers').fetchall():
                 if aliases.intersection(json.loads(barrier['targets'])):raise DeleteConflict('Идёт безопасный сброс расхода; дождитесь его завершения')
         if self.exists(db,'fleet_jobs'):
+            if self.exists(db,'fleet_node_transfers'):
+                for transfer in db.execute('SELECT id,state FROM fleet_node_transfers WHERE node=?',(node,)):
+                    jobs.append(transfer['id'])
+                    if transfer['state']=='switched':raise DeleteConflict('Дождитесь завершения переноса ноды')
             for job in jobs:
                 row=db.execute('SELECT state FROM fleet_jobs WHERE id=?',(job,)).fetchone()
                 if row and row['state']=='running':raise DeleteConflict('Установка ноды ещё выполняется')
+        if self.exists(db,'fleet_proxy_jobs'):
+            marks=','.join('?' for _ in aliases)
+            if db.execute("SELECT 1 FROM fleet_proxy_jobs WHERE node IN ("+marks+") AND state='running'",tuple(aliases)).fetchone():
+                raise DeleteConflict('На ноде ещё выполняется установка прокси')
         labels={}
         if self.exists(db,'fleet_node_labels'):
             labels={r['node']:r['name'] for r in db.execute('SELECT node,name FROM fleet_node_labels').fetchall()}
@@ -75,7 +83,7 @@ class Lifecycle:
                 'host_ids':sorted(hosts),'subscription_addresses':endpoints,'external_endpoints':len(external),
                 'restricted_user_links':affected,'confirmation':revision,
                 'effects':['Запись ноды и её доступы в панели','Связанные адреса из новых ответов подписки','История, метрики, события, проверки и квоты этой ноды','Связи этой ноды в выборе пользователей']+(['Xray этой ноды отключится от панели; активные подключения на ней прервутся'] if native_id is not None else []),
-                'retained':['Общие пользователи, UUID, лимиты и общий расход','Другие ноды и их данные','Существующие резервные копии и внешние журналы','VPS, DNS и службы удалённого сервера; их очистка выполняется отдельно']}
+                'retained':['Общие пользователи, UUID, лимиты и общий расход','Другие ноды и их данные','Существующие резервные копии и внешние журналы','VPS, DNS, VPN-службы и установленные прокси удалённого сервера. Их очистка выполняется отдельно']}
 
     def delete(self,node,name,confirmation,acknowledge_remote):
         if not acknowledge_remote:raise DeleteConflict('Подтвердите границы удаления: удалённый сервер и резервные копии остаются')
@@ -118,10 +126,12 @@ class Lifecycle:
                     ('fleet_xray_hourly','node'),('fleet_node_traffic','node'),('fleet_node_quotas','node'),('fleet_quota_audit','node'),
                     ('fleet_node_labels','node'),('fleet_host_nodes','node'),('fleet_observers','node'),('fleet_observer_sources','node'),('fleet_meters','node'),
                     ('fleet_external_links','node'),('fleet_meter_state','node'),('fleet_meter_samples','node'),('fleet_meter_gaps','node'),
-                    ('hy2_nodes','node'),('hy2_totals','node'),('hy2_hourly','node'),('hy2_samples','node'),('fleet_managed','id'),('fleet_inventory','id')]:
+                    ('hy2_nodes','node'),('hy2_totals','node'),('hy2_hourly','node'),('hy2_samples','node'),('fleet_node_transfers','node'),('fleet_recovery_profiles','node'),('fleet_managed','id'),('fleet_inventory','id')]:
                     if self.exists(db,table):db.execute('DELETE FROM '+table+' WHERE '+column+' IN ('+marks+')',aliases)
                 if self.exists(db,'fleet_jobs'):
                     for job in current['jobs']:db.execute('DELETE FROM fleet_jobs WHERE id=?',(job,))
+                if self.exists(db,'fleet_transfer_components'):
+                    for job in current['jobs']:db.execute('DELETE FROM fleet_transfer_components WHERE transfer_id=?',(job,))
                 if self.exists(db,'fleet_user_meta'):
                     for row in db.execute('SELECT user_id,nodes FROM fleet_user_meta WHERE nodes IS NOT NULL').fetchall():
                         selected=json.loads(row['nodes']);remaining=[n for n in selected if n not in aliases]

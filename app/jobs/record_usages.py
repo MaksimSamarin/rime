@@ -9,9 +9,11 @@ from sqlalchemy import and_, bindparam, insert, select, update
 from sqlalchemy.orm import Session
 from sqlalchemy.sql.dml import Insert
 
-from app import scheduler, xray
+from app import logger, scheduler, xray
 from app.db import GetDB
 from app.db.models import Admin, NodeUsage, NodeUserUsage, System, User
+from app.xray.node import NodeAPIError
+from app.utils.native_usage import record_native_usage, uses_cumulative_usage
 from config import (
     DISABLE_RECORDING_NODE_USAGE,
     JOB_RECORD_NODE_USAGES_INTERVAL,
@@ -127,17 +129,38 @@ def get_outbounds_stats(api: XRayAPI):
         return []
 
 
+def get_recordable_stats(api, node_id, kind, coefficient=1):
+    with api.control_lock:
+        if getattr(api, 'retired', False):
+            return []
+        if node_id is not None and uses_cumulative_usage(api):
+            try:
+                record_native_usage(api, node_id, kind, coefficient,
+                                    history=not DISABLE_RECORDING_NODE_USAGE)
+            except Exception as error:
+                logger.warning('Native usage for node %s will be retried (%s)', node_id, type(error).__name__)
+            return []
+        return get_users_stats(api) if kind == 'users' else get_outbounds_stats(api)
+
+
 def record_user_usages():
     api_instances = {None: xray.api}
     usage_coefficient = {None: 1}  # default usage coefficient for the main api instance
 
     for node_id, node in list(xray.nodes.items()):
-        if node.connected and node.started:
-            api_instances[node_id] = node.api
-            usage_coefficient[node_id] = node.usage_coefficient  # fetch the usage coefficient
+        try:
+            if not (node.connected and node.started):
+                continue
+            api = node.api
+            coefficient = node.usage_coefficient
+        except (OSError, NodeAPIError, xray_exc.XrayError):
+            continue
+        api_instances[node_id] = api
+        usage_coefficient[node_id] = coefficient
 
     with ThreadPoolExecutor(max_workers=10) as executor:
-        futures = {node_id: executor.submit(get_users_stats, api) for node_id, api in api_instances.items()}
+        futures = {node_id: executor.submit(get_recordable_stats, api, node_id, 'users',
+                                            usage_coefficient[node_id]) for node_id, api in api_instances.items()}
     api_params = {node_id: future.result() for node_id, future in futures.items()}
 
     users_usage = defaultdict(int)
@@ -186,11 +209,17 @@ def record_user_usages():
 def record_node_usages():
     api_instances = {None: xray.api}
     for node_id, node in list(xray.nodes.items()):
-        if node.connected and node.started:
-            api_instances[node_id] = node.api
+        try:
+            if not (node.connected and node.started):
+                continue
+            api = node.api
+        except (OSError, NodeAPIError, xray_exc.XrayError):
+            continue
+        api_instances[node_id] = api
 
     with ThreadPoolExecutor(max_workers=10) as executor:
-        futures = {node_id: executor.submit(get_outbounds_stats, api) for node_id, api in api_instances.items()}
+        futures = {node_id: executor.submit(get_recordable_stats, api, node_id, 'outbound')
+                   for node_id, api in api_instances.items()}
     api_params = {node_id: future.result() for node_id, future in futures.items()}
 
     total_up = 0

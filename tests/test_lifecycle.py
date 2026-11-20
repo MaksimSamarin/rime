@@ -73,6 +73,19 @@ class LifecycleTests(unittest.TestCase):
         self.life.disconnect.assert_not_called();self.assertEqual(self.protected(),before)
         with self.assertRaises(DeleteConflict):self.life.plan('xray:local')
 
+    def test_proxy_installation_blocks_node_removal(self):
+        before = self.protected()
+        with self.store.connection(write=True) as db:
+            db.execute('CREATE TABLE fleet_proxy_jobs(id TEXT,node TEXT,state TEXT)')
+            db.execute("INSERT INTO fleet_proxy_jobs VALUES('proxy','xray:1','running')")
+        with self.assertRaises(DeleteConflict):
+            self.life.plan('xray:1')
+        self.life.disconnect.assert_not_called()
+        self.assertEqual(self.protected(), before)
+        with self.store.connection(write=True) as db:
+            db.execute("UPDATE fleet_proxy_jobs SET state='succeeded'")
+        self.assertIsNotNone(self.life.plan('xray:1'))
+
     def test_reused_node_id_requires_new_preview(self):
         plan=self.life.plan('xray:1');self.life.delete('xray:1',plan['name'],plan['confirmation'],True)
         with self.store.connection(write=True) as db:

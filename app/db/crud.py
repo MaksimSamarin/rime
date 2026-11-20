@@ -1331,42 +1331,48 @@ def remove_node(db: Session, dbnode: Node) -> Node:
     return dbnode
 
 
-def update_node(db: Session, dbnode: Node, modify: NodeModify) -> Node:
-    """
-    Updates an existing node with new information.
+def update_node(db: Session, dbnode: Node, modify: NodeModify, related_changes=None) -> Node:
+    """Update endpoint metadata and preserve its explicitly selected entry route."""
+    from hy2bridge.relay_routes import current as relays
+    change = relays.edits.prepare_native(dbnode, modify) if relays else None
+    try:
+        if modify.name is not None:
+            dbnode.name = modify.name
 
-    Args:
-        db (Session): The database session.
-        dbnode (Node): The Node object to be updated.
-        modify (NodeModify): The modification model containing updated node details.
+        if modify.address is not None:
+            dbnode.address = modify.address
 
-    Returns:
-        Node: The updated Node object.
-    """
-    if modify.name is not None:
-        dbnode.name = modify.name
+        if modify.port is not None:
+            dbnode.port = modify.port
 
-    if modify.address is not None:
-        dbnode.address = modify.address
+        if modify.api_port is not None:
+            dbnode.api_port = modify.api_port
 
-    if modify.port is not None:
-        dbnode.port = modify.port
+        if modify.status is NodeStatus.disabled:
+            dbnode.status = modify.status
+            dbnode.xray_version = None
+            dbnode.message = None
+        else:
+            dbnode.status = NodeStatus.connecting
 
-    if modify.api_port is not None:
-        dbnode.api_port = modify.api_port
+        if modify.usage_coefficient:
+            dbnode.usage_coefficient = modify.usage_coefficient
 
-    if modify.status is NodeStatus.disabled:
-        dbnode.status = modify.status
-        dbnode.xray_version = None
-        dbnode.message = None
-    else:
-        dbnode.status = NodeStatus.connecting
-
-    if modify.usage_coefficient:
-        dbnode.usage_coefficient = modify.usage_coefficient
-
-    db.commit()
-    db.refresh(dbnode)
+        db.flush()
+        if change:
+            connection = db.connection().connection.driver_connection
+            relays.edits.mark(change['id'], connection.execute)
+        if related_changes:
+            related_changes(db, dbnode)
+        db.commit()
+        db.refresh(dbnode)
+    except BaseException:
+        db.rollback()
+        if change:
+            relays.edits.finish(change, False)
+        raise
+    if change:
+        relays.edits.finish(change, True)
     return dbnode
 
 
