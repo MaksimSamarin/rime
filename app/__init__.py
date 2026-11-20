@@ -1,6 +1,9 @@
 import logging
+import os
+from pathlib import Path
 
-from apscheduler.schedulers.background import BackgroundScheduler
+from update_runtime.scheduling import CoordinatedScheduler
+from update_runtime.paths import update_directory as resolve_update_directory
 from fastapi import FastAPI, Request, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
@@ -8,9 +11,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 
-from config import ALLOWED_ORIGINS, DOCS, XRAY_SUBSCRIPTION_PATH
+from config import ALLOWED_ORIGINS, DOCS, XRAY_SUBSCRIPTION_PATH, SQLALCHEMY_DATABASE_URL
 
-__version__ = "0.2.0-rc6"
+update_directory = str(resolve_update_directory(SQLALCHEMY_DATABASE_URL, os.environ))
+
+__version__ = "0.9.0"
 __upstream_version__ = "0.8.4"
 
 app = FastAPI(
@@ -21,8 +26,8 @@ app = FastAPI(
     redoc_url="/redoc" if DOCS else None,
 )
 
-scheduler = BackgroundScheduler(
-    {"apscheduler.job_defaults.max_instances": 20}, timezone="UTC"
+scheduler = CoordinatedScheduler(
+    {"apscheduler.job_defaults.max_instances": 20}, timezone="UTC",directory=update_directory
 )
 logger = logging.getLogger("uvicorn.error")
 
@@ -33,6 +38,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+from update_runtime.leases import MutationMiddleware
+app.add_middleware(MutationMiddleware, directory=update_directory)
 from app import jobs, routers, telegram, ui  # noqa
 from app.routers import api_router  # noqa
 

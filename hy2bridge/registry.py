@@ -16,10 +16,12 @@ class Registry:
                 native_id INTEGER,host_id INTEGER)''')
             db.execute('''CREATE TABLE IF NOT EXISTS fleet_external_links(
                 node TEXT PRIMARY KEY,prefix TEXT NOT NULL,suffix TEXT NOT NULL,position INTEGER NOT NULL)''')
+            db.execute('CREATE TABLE IF NOT EXISTS fleet_legacy_retired(node TEXT PRIMARY KEY,transfer_id TEXT NOT NULL)')
 
-    def authorize(self,node,header):
-        with self.store.connection() as db:
-            row=db.execute('SELECT token_hash FROM fleet_managed WHERE id=? AND protocol=?',(node,'hysteria2')).fetchone()
+    def authorize(self,node,header,db=None):
+        if db is None:
+            with self.store.connection() as connection:return self.authorize(node,header,connection)
+        row=db.execute('SELECT token_hash FROM fleet_managed WHERE id=? AND protocol=?',(node,'hysteria2')).fetchone()
         return bool(row and row['token_hash'] and hmac.compare_digest(row['token_hash'],hashlib.sha256(header.removeprefix('Bearer ').encode()).hexdigest()) and header.startswith('Bearer '))
 
     def links(self,auth):
@@ -31,21 +33,36 @@ class Registry:
                 user=self.store.users(db).get(str(auth))
                 rows=[r for r in rows if user and current.allows(user['id'],r['id'],db)]
                 external=[r for r in external if user and current.allows(user['id'],r['node'],db)]
-        return [r['prefix']+quote(str(auth),safe='')+r['suffix'] for r in external]+[f"hysteria2://{quote(str(auth),safe='')}@{r['domain']}:{r['port']}/?sni={r['domain']}#{quote(r['name'],safe='')}" for r in rows]
+        external_nodes={row['node'] for row in external}
+        from .relay_routes import current as relays
+        links = [(r['node'],r['prefix']+quote(str(auth),safe='')+r['suffix']) for r in external]
+        links += [(r['id'],f"hysteria2://{quote(str(auth),safe='')}@{r['domain']}:{r['port']}/?sni={r['domain']}#{quote(r['name'],safe='')}") for r in rows if r['id'] not in external_nodes]
+        return [relays.published_link(node,link) if relays else link for node,link in links]
 
     def install_links(self):
         from app.subscription import share
         from app.models import user
+        from .subscription_hy2 import add_clash_hy2,add_singbox_hy2
         original=share.generate_v2ray_links
-        def generate(proxies,inbounds,extra_data,reverse):
-            links=original(proxies,inbounds,extra_data,reverse)
+        original_singbox=share.generate_singbox_subscription
+        original_clash=share.generate_clash_subscription
+        def authorized_links(proxies):
             for protocol,settings in proxies.items():
                 if str(protocol).lower().endswith('vless'):
                     auth=getattr(settings,'id',None) or (settings.get('id') if isinstance(settings,dict) else None)
-                    if auth:links+=self.links(auth)
-                    break
-            return links
+                    return self.links(auth) if auth else []
+            return []
+        def generate(proxies,inbounds,extra_data,reverse):
+            return original(proxies,inbounds,extra_data,reverse)+authorized_links(proxies)
+        def generate_singbox(proxies,inbounds,extra_data,reverse):
+            config=original_singbox(proxies,inbounds,extra_data,reverse)
+            return add_singbox_hy2(config,authorized_links(proxies))
+        def generate_clash(proxies,inbounds,extra_data,reverse,is_meta=False):
+            config=original_clash(proxies,inbounds,extra_data,reverse,is_meta)
+            return add_clash_hy2(config,authorized_links(proxies),meta=is_meta)
         share.generate_v2ray_links=generate;user.generate_v2ray_links=generate
+        share.generate_singbox_subscription=generate_singbox
+        share.generate_clash_subscription=generate_clash
 
     def callbacks(self,operations,settings):
         from app import xray
@@ -60,12 +77,16 @@ class Registry:
             if d['protocol']=='vless':
                 t=settings['vless_template']
                 with GetDB() as db:
-                    n=crud.create_node(db,NodeCreate(name='fleet-'+job,address=d.get('_registration_address',d['host']),port=t['service_port'],api_port=t['api_port'],add_as_new_host=False))
+                    n=crud.create_node(db,NodeCreate(name='fleet-'+job,address=d.get('_registration_address') or d.get('address') or d['host'],port=t['service_port'],api_port=t['api_port'],add_as_new_host=False))
                     native_id=n.id
+                from .native_trust import current
+                if current is None or not d.get('_management_server_certificate'):
+                    raise RuntimeError('Verified native management certificate is unavailable')
+                current.enroll('xray:'+str(native_id),d['_management_server_certificate'])
             with self.store.connection(write=True) as db:
                 db.execute('INSERT INTO fleet_managed(id,protocol,token_hash,name,domain,port,native_id) VALUES(?,?,?,?,?,?,?)',
                     (job,d['protocol'],hashlib.sha256(token.encode()).hexdigest(),d['name'],d['domain'],d['vpn_port'],native_id))
-            if d['protocol']=='hysteria2':operations.ensure_node(job,d['name'],address=d['host'])
+            if d['protocol']=='hysteria2':operations.ensure_node(job,d['name'],address=d.get('address') or d['host'])
             else:
                 operations.observers.register_native('xray:'+str(native_id),token,d['domain'],d['vpn_port'])
                 xray.operations.connect_node(native_id)
@@ -97,6 +118,8 @@ class Registry:
                     if db.execute("SELECT 1 FROM sqlite_master WHERE name='fleet_observer_sources'").fetchone():db.execute('DELETE FROM fleet_observer_sources WHERE node=?',(alias,))
                     db.execute('DELETE FROM fleet_health WHERE node=?',(alias,))
                     if db.execute("SELECT 1 FROM sqlite_master WHERE name='fleet_health_history'").fetchone():db.execute('DELETE FROM fleet_health_history WHERE node=?',(alias,))
+                    db.execute('DELETE FROM fleet_events WHERE node=?',(alias,))
+                    if db.execute("SELECT 1 FROM sqlite_master WHERE name='fleet_client_probes'").fetchone():db.execute('DELETE FROM fleet_client_probes WHERE node=?',(alias,))
                 db.execute('DELETE FROM fleet_managed WHERE id=?',(job,))
                 db.execute('DELETE FROM fleet_inventory WHERE id=?',(job,))
                 db.execute('DELETE FROM fleet_health WHERE node=?',(job,))
@@ -112,7 +135,12 @@ class Registry:
             if node and d.get('_expected_memory') is not None:ok=ok and node['metrics'].get('mem_total_bytes')==d['_expected_memory']
             if d['protocol']=='hysteria2':ok=ok and node['metrics'].get('accounting_durable') is True
             else:ok=ok and operations.native_probe(row['native_id']) is True
-            if not ok:return False
+            return ok
+
+        def activate(job,d):
+            with self.store.connection() as db:row=db.execute('SELECT * FROM fleet_managed WHERE id=?',(job,)).fetchone()
+            if row is None:raise ValueError('Регистрация новой ноды отсутствует')
+            node_id=job if d['protocol']=='hysteria2' else 'xray:'+str(row['native_id'])
             host_id=None
             if d['protocol']=='vless' and not row['active']:
                 t=settings['vless_template']
@@ -128,4 +156,4 @@ class Registry:
                 db.execute('UPDATE fleet_managed SET active=1,host_id=COALESCE(?,host_id) WHERE id=?',(host_id,job))
                 if host_id is not None:db.execute('INSERT OR REPLACE INTO fleet_host_nodes VALUES(?,?)',(host_id,node_id))
             return True
-        return register,unregister,ready
+        return register,unregister,ready,activate

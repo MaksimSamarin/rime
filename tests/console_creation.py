@@ -5,10 +5,11 @@ import e2e as t
 def links(user):return base64.b64decode(t.request(user['subscription_url'])).decode().splitlines()
 
 try:
+    origin=t.public_origin()
     t.save('xray.json',{'log':{'loglevel':'warning'},'inbounds':[
         {'tag':tag,'listen':'127.0.0.1','port':port,'protocol':'vless','settings':{'clients':[],'decryption':'none'},'streamSettings':{'network':'tcp'}}
         for tag,port in [('VLESS_A',16443),('VLESS_B',16444)]],
-        'outbounds':[{'tag':'DIRECT','protocol':'freedom','settings':{'finalRules':[{'action':'allow','ip':['127.0.0.1/32']}]}}]})
+        'outbounds':[{'tag':'DIRECT','protocol':'freedom','settings':{'finalRules':[{'action':'allow','ip':[origin+'/32']}]}}]})
     t.save('panel.json',{'node_tokens':{},'safe_period_reset':False})
     migration=t.start('migrate',[sys.executable,'-m','alembic','upgrade','head']);assert migration.wait(timeout=40)==0
     panel,admin=t.panel('console')
@@ -22,11 +23,11 @@ try:
     t.check('console_create_preserves_all_nodes_and_tags',user['nodes'] is None and user['tags']==['test-group'] and user['note']=='test note')
     issued=links(user)
     t.check('new_subscription_has_native_and_both_external_hy2',sum(x.startswith('vless://') for x in issued)==2 and sum(x.startswith('hysteria2://') for x in issued)==2)
-    server=socketserver.ThreadingTCPServer(('127.0.0.1',18080),t.TCP);server.daemon_threads=True
+    server=socketserver.ThreadingTCPServer((origin,18080),t.TCP);server.daemon_threads=True
     threading.Thread(target=server.serve_forever,daemon=True).start()
     for index,port in enumerate([16443,16444]):
         local=18110+index
-        cfg=t.save('client'+str(index)+'.json',{'log':{'loglevel':'error'},'inbounds':[{'listen':'127.0.0.1','port':local,'protocol':'dokodemo-door','settings':{'address':'127.0.0.1','port':18080,'network':'tcp'}}],
+        cfg=t.save('client'+str(index)+'.json',{'log':{'loglevel':'error'},'inbounds':[{'listen':'127.0.0.1','port':local,'protocol':'dokodemo-door','settings':{'address':origin,'port':18080,'network':'tcp'}}],
             'outbounds':[{'protocol':'vless','settings':{'vnext':[{'address':'127.0.0.1','port':port,'users':[{'id':user['proxies']['vless']['id'],'encryption':'none'}]}]}}]})
         t.start('client'+str(index),[t.XRAY_BINARY,'run','-c',cfg]);t.wait(lambda:t.fresh(local))
         with t.conn(local) as connection:t.check('new_user_vless_payload_'+str(index),t.echo(connection,8192))

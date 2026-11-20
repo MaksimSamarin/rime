@@ -3,22 +3,26 @@ import threading
 from typing import TYPE_CHECKING
 
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy import text
 
 from app import logger, xray
 from app.db import GetDB, crud
 from app.models.node import NodeStatus
 from app.models.user import UserResponse
 from app.utils.concurrency import threaded_function
-from app.xray.node import XRayNode
+from app.utils.node_jobs import NodeJobs
+from app.xray.node import XRayNode, ReSTXRayNode, RPyCXRayNode, _node_control_options
 from xray_api import XRay as XRayAPI
 from xray_api.types.account import Account, XTLSFlows
 from hy2bridge.access import allows, filter_config
+from hy2bridge.native_users import supports_inbound
 
 if TYPE_CHECKING:
     from app.db import User as DBUser
     from app.db.models import Node as DBNode
 
 NODE_LIFECYCLE_LOCK=threading.RLock()
+_node_jobs = NodeJobs(logger=logger)
 
 
 @lru_cache(maxsize=None)
@@ -34,30 +38,39 @@ def get_tls():
 
 @threaded_function
 def _add_user_to_inbound(api: XRayAPI, inbound_tag: str, account: Account):
-    try:
-        api.add_inbound_user(tag=inbound_tag, user=account, timeout=30)
-    except (xray.exc.EmailExistsError, xray.exc.ConnectionError):
-        pass
+    with api.control_lock:
+        if getattr(api, 'retired', False):
+            return
+        try:
+            api.add_inbound_user(tag=inbound_tag, user=account, timeout=30)
+        except (xray.exc.EmailExistsError, xray.exc.ConnectionError):
+            pass
 
 
 @threaded_function
 def _remove_user_from_inbound(api: XRayAPI, inbound_tag: str, email: str):
-    try:
-        api.remove_inbound_user(tag=inbound_tag, email=email, timeout=30)
-    except (xray.exc.EmailNotFoundError, xray.exc.ConnectionError):
-        pass
+    with api.control_lock:
+        if getattr(api, 'retired', False):
+            return
+        try:
+            api.remove_inbound_user(tag=inbound_tag, email=email, timeout=30)
+        except (xray.exc.EmailNotFoundError, xray.exc.ConnectionError):
+            pass
 
 
 @threaded_function
 def _alter_inbound_user(api: XRayAPI, inbound_tag: str, account: Account):
-    try:
-        api.remove_inbound_user(tag=inbound_tag, email=account.email, timeout=30)
-    except (xray.exc.EmailNotFoundError, xray.exc.ConnectionError):
-        pass
-    try:
-        api.add_inbound_user(tag=inbound_tag, user=account, timeout=30)
-    except (xray.exc.EmailExistsError, xray.exc.ConnectionError):
-        pass
+    with api.control_lock:
+        if getattr(api, 'retired', False):
+            return
+        try:
+            api.remove_inbound_user(tag=inbound_tag, email=account.email, timeout=30)
+        except (xray.exc.EmailNotFoundError, xray.exc.ConnectionError):
+            pass
+        try:
+            api.add_inbound_user(tag=inbound_tag, user=account, timeout=30)
+        except (xray.exc.EmailExistsError, xray.exc.ConnectionError):
+            pass
 
 
 def add_user(dbuser: "DBUser"):
@@ -91,7 +104,7 @@ def add_user(dbuser: "DBUser"):
             if allows(dbuser.id, 'xray:local'):
                 _add_user_to_inbound(xray.api, inbound_tag, account)
             for node_id, node in list(xray.nodes.items()):
-                if node.connected and node.started and allows(dbuser.id, 'xray:'+str(node_id)):
+                if node.connected and node.started and supports_inbound(node, inbound_tag) and allows(dbuser.id, 'xray:'+str(node_id)):
                     _add_user_to_inbound(node.api, inbound_tag, account)
 
 
@@ -101,7 +114,7 @@ def remove_user(dbuser: "DBUser"):
     for inbound_tag in xray.config.inbounds_by_tag:
         _remove_user_from_inbound(xray.api, inbound_tag, email)
         for node in list(xray.nodes.values()):
-            if node.connected and node.started:
+            if node.connected and node.started and supports_inbound(node, inbound_tag):
                 _remove_user_from_inbound(node.api, inbound_tag, email)
 
 
@@ -140,7 +153,7 @@ def update_user(dbuser: "DBUser"):
             else:
                 _remove_user_from_inbound(xray.api, inbound_tag, email)
             for node_id, node in list(xray.nodes.items()):
-                if node.connected and node.started:
+                if node.connected and node.started and supports_inbound(node, inbound_tag):
                     if allows(dbuser.id, 'xray:'+str(node_id)):
                         _alter_inbound_user(node.api, inbound_tag, account)
                     else:
@@ -152,18 +165,23 @@ def update_user(dbuser: "DBUser"):
         # remove disabled inbounds
         _remove_user_from_inbound(xray.api, inbound_tag, email)
         for node in list(xray.nodes.values()):
-            if node.connected and node.started:
+            if node.connected and node.started and supports_inbound(node, inbound_tag):
                 _remove_user_from_inbound(node.api, inbound_tag, email)
 
 
-def remove_node(node_id: int):
-    with NODE_LIFECYCLE_LOCK:return _remove_node(node_id)
+def remove_node(node_id: int, stop=True):
+    with NODE_LIFECYCLE_LOCK:return _remove_node(node_id, stop=stop)
 
 
-def _remove_node(node_id: int):
+def _remove_node(node_id: int, stop=True):
     if node_id in xray.nodes:
+        if stop:
+            try:xray.nodes[node_id].stop()
+            except Exception:pass
         try:
-            xray.nodes[node_id].disconnect()
+            node = xray.nodes[node_id]
+            close = getattr(node, 'close', node.disconnect)
+            close()
         except Exception:
             pass
         finally:
@@ -174,17 +192,46 @@ def _remove_node(node_id: int):
 
 
 def add_node(dbnode: "DBNode"):
-    remove_node(dbnode.id)
-
+    previous=xray.nodes.get(dbnode.id)
+    protocol=None
+    if previous:
+        if isinstance(previous,ReSTXRayNode):protocol='rest'
+        elif isinstance(previous,RPyCXRayNode):protocol='rpyc'
     tls = get_tls()
-    xray.nodes[dbnode.id] = XRayNode(address=dbnode.address,
-                                     port=dbnode.port,
-                                     api_port=dbnode.api_port,
+    try:
+        with GetDB() as db:
+            managed = db.execute(text('SELECT 1 FROM fleet_managed WHERE native_id=:node_id'),
+                                 {'node_id': dbnode.id}).first() is not None
+    except SQLAlchemyError:
+        managed = False
+    configured=_node_control_options(dbnode.address).get('protocol')
+    options = {'protocol': configured or ('rest' if managed else protocol)}
+    address, service_port, api_port = _management_endpoint(dbnode)
+    from hy2bridge.native_trust import client_options
+    options.update(client_options(dbnode))
+    remove_node(dbnode.id, stop=False)
+    xray.nodes[dbnode.id] = XRayNode(address=address,
+                                     port=service_port,
+                                     api_port=api_port,
                                      ssl_key=tls['key'],
                                      ssl_cert=tls['certificate'],
-                                     usage_coefficient=dbnode.usage_coefficient)
+                                     usage_coefficient=dbnode.usage_coefficient,control_address=dbnode.address,
+                                     control_api_port=dbnode.api_port, **options)
 
     return xray.nodes[dbnode.id]
+
+
+def _management_endpoint(dbnode):
+    from hy2bridge.relay_routes import management
+    return management('xray:' + str(dbnode.id), dbnode.address, dbnode.port, dbnode.api_port)
+
+
+def _node_endpoint_matches(node, dbnode):
+    current = (getattr(node, 'address', None), getattr(node, 'port', None), getattr(node, 'api_port', None))
+    identity = (getattr(node, 'control_address', dbnode.address),
+                getattr(node, 'control_api_port', dbnode.api_port), node.usage_coefficient)
+    expected_identity = (dbnode.address, dbnode.api_port, dbnode.usage_coefficient)
+    return current == _management_endpoint(dbnode) and identity == expected_identity
 
 
 def _change_node_status(node_id: int, status: NodeStatus, message: str = None, version: str = None):
@@ -207,9 +254,14 @@ global _connecting_nodes
 _connecting_nodes = {}
 
 
-@threaded_function
-def connect_node(node_id, config=None):
-    with NODE_LIFECYCLE_LOCK:return _connect_node(node_id,config)
+def connect_node(node_id, config=None, refresh_endpoint=False):
+    return _node_jobs.submit(node_id, "connect", _connect_node_locked, node_id, config,
+                             replace_connect=refresh_endpoint)
+
+
+def _connect_node_locked(node_id, config=None):
+    with NODE_LIFECYCLE_LOCK:
+        return _connect_node(node_id, config)
 
 
 def _connect_node(node_id, config=None):
@@ -221,14 +273,20 @@ def _connect_node(node_id, config=None):
     with GetDB() as db:
         dbnode = crud.get_node_by_id(db, node_id)
 
-    if not dbnode:
+    if not dbnode or dbnode.status == NodeStatus.disabled:
         return
 
     try:
         node = xray.nodes[dbnode.id]
+        if not _node_endpoint_matches(node, dbnode):
+            raise ConnectionError('Node management endpoint changed')
         assert node.connected
-    except (KeyError, AssertionError):
-        node = xray.operations.add_node(dbnode)
+    except (KeyError, AssertionError, ConnectionError, TimeoutError, OSError):
+        try:node = xray.operations.add_node(dbnode)
+        except Exception as error:
+            _change_node_status(node_id,NodeStatus.error,message=str(error))
+            logger.info(f'Unable to establish trusted management of node {node_id}')
+            return
 
     try:
         _connecting_nodes[node_id] = True
@@ -236,10 +294,18 @@ def _connect_node(node_id, config=None):
         _change_node_status(node_id, NodeStatus.connecting)
         logger.info(f"Connecting to \"{dbnode.name}\" node")
 
+        refresh_users = config is None
         if config is None:
             config = xray.config.include_db_users()
 
         node.start(filter_config(config, 'xray:'+str(node_id)))
+        if refresh_users and getattr(node, '_user_reconcile', False):
+            # User changes committed while the replacement was starting may
+            # have skipped its unavailable API. Re-read after it is usable.
+            with node.api.control_lock:
+                node.start(filter_config(xray.config.include_db_users(), 'xray:'+str(node_id)))
+        import time
+        node.observed_health = (time.monotonic(), True)
         version = node.get_version()
         _change_node_status(node_id, NodeStatus.connected, version=version)
         logger.info(f"Connected to \"{dbnode.name}\" node, xray run on v{version}")
@@ -255,25 +321,35 @@ def _connect_node(node_id, config=None):
             pass
 
 
-@threaded_function
 def restart_node(node_id, config=None):
-    with NODE_LIFECYCLE_LOCK:return _restart_node(node_id,config)
+    return _node_jobs.submit(node_id, "restart", _restart_node_locked, node_id, config)
+
+
+def _restart_node_locked(node_id, config=None):
+    with NODE_LIFECYCLE_LOCK:
+        return _restart_node(node_id, config)
 
 
 def _restart_node(node_id, config=None):
     with GetDB() as db:
         dbnode = crud.get_node_by_id(db, node_id)
 
-    if not dbnode:
+    if not dbnode or dbnode.status == NodeStatus.disabled:
         return
 
     try:
         node = xray.nodes[dbnode.id]
-    except KeyError:
-        node = xray.operations.add_node(dbnode)
+        if not _node_endpoint_matches(node, dbnode):
+            raise ConnectionError('Node management endpoint changed')
+    except (KeyError, ConnectionError):
+        try:node = xray.operations.add_node(dbnode)
+        except Exception as error:
+            _change_node_status(node_id,NodeStatus.error,message=str(error))
+            logger.info(f'Unable to establish trusted management of node {node_id}')
+            return
 
     if not node.connected:
-        return connect_node(node_id, config)
+        return _connect_node(node_id, config)
 
     try:
         logger.info(f"Restarting Xray core of \"{dbnode.name}\" node")
@@ -282,6 +358,12 @@ def _restart_node(node_id, config=None):
             config = xray.config.include_db_users()
 
         node.restart(filter_config(config, 'xray:'+str(node_id)))
+        if getattr(node,'_user_reconcile',False):
+            with node.api.control_lock:
+                # Callers pass an already populated startup snapshot. Read the
+                # current base again, including commits made during restart.
+                latest=xray.config.include_db_users()
+                node.start(filter_config(latest,'xray:'+str(node_id)))
         logger.info(f"Xray core of \"{dbnode.name}\" node restarted")
     except Exception as e:
         _change_node_status(node_id, NodeStatus.error, message=str(e))

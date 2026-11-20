@@ -5,8 +5,10 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Literal
 
 from fastapi import BackgroundTasks, Depends, HTTPException, Query
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
+from .provision import ProvisionError
 
 
 class UserEdit(BaseModel):
@@ -37,6 +39,7 @@ class NodeEdit(BaseModel):
     usage_coefficient: float | None = Field(default=None,gt=0,le=100)
     enabled: bool | None = None
     active: bool | None = None
+    origin_address: str | None = Field(default=None,min_length=1,max_length=253)
 
 
 class NodeQuotaEdit(BaseModel):
@@ -54,6 +57,7 @@ def install(app,store,operations,access):
     from app.models.admin import Admin
     from app.models.user import UserCreate,UserModify,UserResponse,NextPlanModel
     from app.models.node import NodeModify,NodeStatus
+    from config import DASHBOARD_PATH
 
     with store.connection(write=True) as db:
         db.execute('''CREATE TABLE IF NOT EXISTS fleet_event_actions(
@@ -62,6 +66,14 @@ def install(app,store,operations,access):
         db.execute('''CREATE TABLE IF NOT EXISTS fleet_health_history(
             node TEXT NOT NULL,minute INTEGER NOT NULL,state TEXT NOT NULL,metrics TEXT NOT NULL,
             PRIMARY KEY(node,minute))''')
+        db.execute('CREATE INDEX IF NOT EXISTS fleet_health_history_time ON fleet_health_history(minute,node)')
+
+    @app.middleware('http')
+    async def unified_dashboard(request,call_next):
+        path=request.url.path.rstrip('/');dashboard=DASHBOARD_PATH.rstrip('/')
+        if path==dashboard or path.startswith(dashboard+'/'):
+            return RedirectResponse('/fleet#users',status_code=307)
+        return await call_next(request)
 
     def sample():
         minute=int(time.time())//60*60
@@ -107,6 +119,7 @@ def install(app,store,operations,access):
 
     @app.get('/api/fleet/users',tags=['Fleet'])
     def users(q:str='',tag:str='',offset:int=Query(0,ge=0),limit:int=Query(30,ge=1,le=100),
+              view:Literal['full','list','picker']='full',
               admin:Admin=Depends(Admin.check_sudo_admin)):
         with GetDB() as db:
             query=db.query(User)
@@ -116,7 +129,16 @@ def install(app,store,operations,access):
                     ids=[r['user_id'] for r in conn.execute('''SELECT m.user_id FROM fleet_user_meta m
                         JOIN users u ON u.id=m.user_id AND u.created_at=m.user_created, json_each(m.tags) t WHERE t.value=?''',(tag,))]
                 query=query.filter(User.id.in_(ids))
-            return {'total':query.count(),'users':[serialize(u) for u in query.order_by(User.username).offset(offset).limit(limit)]}
+            total=query.count();page=query.order_by(User.username).offset(offset).limit(limit).all()
+            if view=='full':return {'total':total,'users':[serialize(u) for u in page]}
+            metadata=access.metadata_many([u.id for u in page]);result=[]
+            for user in page:
+                meta=metadata.get(user.id,{'tags':[],'nodes':None})
+                value={'username':user.username,'tags':meta['tags']}
+                if view=='list':value.update(status=getattr(user.status,'value',user.status),used_traffic=user.used_traffic,
+                    data_limit=user.data_limit,expire=user.expire,nodes=meta['nodes'])
+                result.append(value)
+            return {'total':total,'users':result}
 
     @app.get('/api/fleet/tags',tags=['Fleet'])
     def tags(admin:Admin=Depends(Admin.check_sudo_admin)):
@@ -172,17 +194,15 @@ def install(app,store,operations,access):
             return serialize(user)
 
     @app.get('/api/fleet/monitoring',tags=['Fleet'])
-    def monitoring(node:str|None=None,hours:int=Query(24,ge=1,le=168),admin:Admin=Depends(Admin.check_sudo_admin)):
+    def monitoring(node:str|None=None,hours:int=Query(24,ge=1,le=168),view:Literal['full','timeline','charts']='full',admin:Admin=Depends(Admin.check_sudo_admin)):
         nodes=operations.nodes()
-        with store.connection() as db:
-            sql='SELECT * FROM fleet_health_history WHERE minute>=?';params=[time.time()-hours*3600]
-            if node:sql+=' AND node=?';params.append(node)
-            rows=[{**dict(r),'metrics':json.loads(r['metrics'])} for r in db.execute(sql+' ORDER BY minute',params)]
+        from .history import read_history
+        rows=read_history(store,time.time()-hours*3600,node,view)
         return {'nodes':[n for n in nodes if not node or n['id']==node],'history':rows,'retention_days':7,
                 'sample_seconds':60,'generated_at':time.time()}
 
     @app.get('/api/fleet/nodes/{node}',tags=['Fleet'])
-    def detail(node:str,admin:Admin=Depends(Admin.check_sudo_admin)):
+    def detail(node:str,compact:bool=False,admin:Admin=Depends(Admin.check_sudo_admin)):
         result=node_by_id(node)
         with store.connection() as db:
             managed=db.execute('''SELECT id,domain,port AS vpn_port,active,native_id,host_id FROM fleet_managed
@@ -206,7 +226,7 @@ def install(app,store,operations,access):
         result['events']=[e for e in operations.events(250) if e['node']==node]
         result['checks']=operations.checks(node)
         now=datetime.now(timezone.utc)
-        result['traffic']=operations.traffic(now-timedelta(days=7),now,node=node)
+        result['traffic']=operations.traffic(now-timedelta(days=7),now,node=node,detail=not compact)
         return result
 
     @app.get('/api/fleet/nodes/{node}/connections',tags=['Fleet'])
@@ -216,42 +236,70 @@ def install(app,store,operations,access):
             'state':result['metrics'].get('connection_metric_state','unavailable'),'count':result['metrics'].get('online_connections'),
             'details':result['metrics'].get('connection_details')}
 
+    def save_node_metadata(db,node,data,found):
+        db.execute('INSERT OR REPLACE INTO fleet_node_labels VALUES(?,?)',(node,data.name))
+        if data.host_ids is not None:
+            valid={r['id'] for r in db.execute('SELECT id FROM hosts')}
+            if found['protocol']=='hysteria2' or not set(data.host_ids)<=valid:raise HTTPException(422,'Некорректные адреса подписки')
+            occupied={r['host_id'] for r in db.execute('SELECT host_id FROM fleet_host_nodes WHERE node<>?',(node,))}
+            if occupied & set(data.host_ids):raise HTTPException(409,'Адрес уже привязан к другой ноде')
+            db.execute('DELETE FROM fleet_host_nodes WHERE node=?',(node,))
+            for hid in data.host_ids:db.execute('INSERT INTO fleet_host_nodes VALUES(?,?)',(hid,node))
+        db.execute('UPDATE fleet_inventory SET name=? WHERE id=?',(data.name,node))
+        if data.address is not None:db.execute('UPDATE fleet_inventory SET address=? WHERE id=?',(data.address,node))
+        if data.enabled is not None:db.execute('UPDATE fleet_inventory SET enabled=? WHERE id=?',(int(data.enabled),node))
+        db.execute("UPDATE fleet_managed SET name=? WHERE id=? OR ('xray:'||native_id)=?",(data.name,node,node))
+        managed=db.execute("SELECT id,protocol FROM fleet_managed WHERE id=? OR ('xray:'||native_id)=?",(node,node)).fetchone()
+        if managed:
+            if data.address is not None and managed['protocol']=='hysteria2':db.execute('UPDATE fleet_managed SET domain=? WHERE id=?',(data.address,managed['id']))
+            if data.vpn_port is not None:db.execute('UPDATE fleet_managed SET port=? WHERE id=?',(data.vpn_port,managed['id']))
+            if data.active is not None:db.execute('UPDATE fleet_managed SET active=? WHERE id=?',(int(data.active),managed['id']))
+
     @app.put('/api/fleet/nodes/{node}',tags=['Fleet'])
     def node_edit(node:str,data:NodeEdit,bg:BackgroundTasks,admin:Admin=Depends(Admin.check_sudo_admin)):
+        with store.connection() as db:
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='fleet_node_transfers'").fetchone() and db.execute("SELECT 1 FROM fleet_node_transfers WHERE node=? AND state='switched'",(node,)).fetchone():
+                raise HTTPException(409,'Дождитесь завершения переноса ноды')
         found=node_by_id(node)
         if found.get('monitoring_only') and any(getattr(data,key) is not None for key in
-                ('host_ids','address','port','api_port','vpn_port','usage_coefficient','enabled','active')):
+                ('host_ids','address','origin_address','port','api_port','vpn_port','usage_coefficient','enabled','active')):
             raise HTTPException(409,'Эта Hy2-нода подключена только к мониторингу. Изменение VPN требует переноса управления.')
         if node=='xray:local' and any(getattr(data,key) is not None for key in
-                ('host_ids','address','port','api_port','vpn_port','usage_coefficient','enabled','active')):
+                ('host_ids','address','origin_address','port','api_port','vpn_port','usage_coefficient','enabled','active')):
             raise HTTPException(422,'У хаба нет настроек выходной ноды. Локальные VPN-привязки сохраняются отдельно.')
-        with store.connection(write=True) as db:
-            db.execute('INSERT OR REPLACE INTO fleet_node_labels VALUES(?,?)',(node,data.name))
-            if data.host_ids is not None:
-                valid={r['id'] for r in db.execute('SELECT id FROM hosts')}
-                if found['protocol']=='hysteria2' or not set(data.host_ids)<=valid:raise HTTPException(422,'Некорректные адреса подписки')
-                occupied={r['host_id'] for r in db.execute('SELECT host_id FROM fleet_host_nodes WHERE node<>?',(node,))}
-                if occupied & set(data.host_ids):raise HTTPException(409,'Адрес уже привязан к другой ноде')
-                db.execute('DELETE FROM fleet_host_nodes WHERE node=?',(node,))
-                for hid in data.host_ids:db.execute('INSERT INTO fleet_host_nodes VALUES(?,?)',(hid,node))
-            db.execute('UPDATE fleet_inventory SET name=? WHERE id=?',(data.name,node))
-            if data.address is not None:db.execute('UPDATE fleet_inventory SET address=? WHERE id=?',(data.address,node))
-            if data.enabled is not None:db.execute('UPDATE fleet_inventory SET enabled=? WHERE id=?',(int(data.enabled),node))
-            db.execute("UPDATE fleet_managed SET name=? WHERE id=? OR ('xray:'||native_id)=?",(data.name,node,node))
-            managed=db.execute("SELECT id,protocol FROM fleet_managed WHERE id=? OR ('xray:'||native_id)=?",(node,node)).fetchone()
-            if managed:
-                if data.address is not None:db.execute('UPDATE fleet_managed SET domain=? WHERE id=?',(data.address,managed['id']))
-                if data.vpn_port is not None:db.execute('UPDATE fleet_managed SET port=? WHERE id=?',(data.vpn_port,managed['id']))
-                if data.active is not None:db.execute('UPDATE fleet_managed SET active=? WHERE id=?',(int(data.active),managed['id']))
         if node.startswith('xray:') and node!='xray:local':
-            with GetDB() as db:
-                dbnode=crud.get_node_by_id(db,int(node[5:]))
-                if not dbnode:raise HTTPException(404,'Нода не найдена')
-                modify=NodeModify(name=data.name,address=data.address,port=data.port,api_port=data.api_port,
-                    usage_coefficient=data.usage_coefficient,status=(NodeStatus.connected if data.enabled is not False else NodeStatus.disabled))
-                updated=crud.update_node(db,dbnode,modify)
-                xray.operations.remove_node(updated.id)
-                if updated.status!=NodeStatus.disabled:bg.add_task(xray.operations.connect_node,node_id=updated.id)
+            import sqlite3
+            def related_changes(session,dbnode):
+                connection=session.connection().connection.driver_connection
+                previous=connection.row_factory
+                connection.row_factory=sqlite3.Row
+                try:save_node_metadata(connection,node,data,found)
+                finally:connection.row_factory=previous
+            try:
+                with GetDB() as db:
+                    dbnode=crud.get_node_by_id(db,int(node[5:]))
+                    if not dbnode:raise HTTPException(404,'Нода не найдена')
+                    modify=NodeModify(name=data.name,address=data.address,port=data.port,api_port=data.api_port,
+                        usage_coefficient=data.usage_coefficient,status=(NodeStatus.connected if data.enabled is not False else NodeStatus.disabled))
+                    updated=crud.update_node(db,dbnode,modify,related_changes=related_changes)
+                    xray.operations.remove_node(updated.id,stop=data.enabled is False)
+                    if updated.status!=NodeStatus.disabled:bg.add_task(xray.operations.connect_node,node_id=updated.id)
+            except ProvisionError as error:raise HTTPException(409,str(error)) from None
+        else:
+            relays=getattr(getattr(app.state,'fleet_proxy',None),'relays',None)
+            change=None
+            accepted=False
+            try:
+                if relays and node!='xray:local':change=relays.edits.prepare_inventory(node,data)
+                with store.connection(write=True) as db:
+                    save_node_metadata(db,node,data,found)
+                    if change:
+                        db.execute('UPDATE fleet_inventory SET address=? WHERE id=?',(change['address'],node))
+                        relays.edits.mark(change['id'],db.execute)
+                accepted=True
+            except ProvisionError as error:raise HTTPException(409,str(error)) from None
+            finally:
+                if change:relays.edits.finish(change,accepted)
         return {'saved':True,'reconnect_scheduled':node.startswith('xray:') and node!='xray:local' and data.enabled is not False}
 
     @app.post('/api/fleet/nodes/{node}/checks',tags=['Fleet'])

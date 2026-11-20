@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 
 from .spool import Spool
 from .connections import hy2_summary
+from .policy import LocalPolicy
 
 
 LOG = logging.getLogger('hy2bridge')
@@ -50,6 +51,8 @@ class Agent:
             raise ValueError('Local auth endpoint must bind loopback')
         self.http = HTTP(config.get('panel_ca'))
         self.spool = Spool(config['spool'])
+        self.policy = LocalPolicy(config['spool'])
+        self.charged = self.spool.charged()
         self.allowed = frozenset()
         self.last_success = 0.0
         self.last_error = None
@@ -110,7 +113,7 @@ class Agent:
 
     def permits(self, auth):
         with self.lock:
-            return time.monotonic()-self.last_success < self.config.get('policy_ttl',5) and auth in self.allowed
+            return self.policy.permits(auth, self.charged)
 
     def cycle(self):
         cfg=self.config
@@ -126,6 +129,8 @@ class Agent:
                 if epoch != self.epoch():
                     raise RuntimeError('Hysteria restarted during snapshot')
             batch=self.spool.observe(epoch,stats)
+            with self.lock:
+                self.charged={auth:v['tx']+v['rx'] for auth,v in batch['totals'].items()}
             response=self.http.request(cfg['panel_url']+'/usage',cfg['node_token'],batch)
             if response.get('accepted') != batch['seq']:
                 raise ValueError('Panel did not acknowledge sequence')
@@ -137,6 +142,9 @@ class Agent:
             if not isinstance(allowed,list) or not all(isinstance(x,str) for x in allowed):
                 raise ValueError('Invalid policy')
             with self.lock:
+                # Transient checks/barriers do not define the durable policy version.
+                saved={k:v for k,v in policy.items() if k not in ('check','barriers')}
+                self.policy.replace(saved)
                 self.allowed=frozenset(allowed)
                 self.last_success=time.monotonic()
                 self.last_error=None
@@ -145,7 +153,7 @@ class Agent:
                 changed=self.last_error != type(exc).__name__
                 self.last_error=type(exc).__name__
             if changed:
-                LOG.warning('Reconciliation failed (%s); authorization expires after policy TTL',type(exc).__name__)
+                LOG.warning('Reconciliation failed (%s); retaining local authorization rules',type(exc).__name__)
         # Enforcement is independent of whether accounting/panel access succeeded.
         # A fresh denial is effective before a kick, preventing reconnect races.
         try:
@@ -160,7 +168,6 @@ class Agent:
             online=None
             with self.lock:
                 self.last_error='EnforcementUnavailable'
-                self.last_success=0.0
         if cfg.get('durable') and online is not None and not self.last_error:
             active_ids={b['id'] for b in barriers}
             self.barrier_seen={k:v for k,v in self.barrier_seen.items() if k in active_ids}
@@ -230,8 +237,9 @@ class Agent:
                     self.send_error(404);return
                 with agent.lock:
                     healthy=time.monotonic()-agent.last_success < agent.config.get('policy_ttl',5)
-                    raw=json.dumps({'fresh':healthy,'error':agent.last_error,'kick_attempts':agent.kick_attempts}).encode()
-                self.send_response(200 if healthy else 503)
+                    ready=agent.policy.value is not None
+                    raw=json.dumps({'fresh':healthy,'ready':ready,'error':agent.last_error,'kick_attempts':agent.kick_attempts}).encode()
+                self.send_response(200 if ready else 503)
                 self.send_header('Content-Type','application/json')
                 self.send_header('Content-Length',str(len(raw)))
                 self.end_headers();self.wfile.write(raw)

@@ -55,6 +55,13 @@ def add_node(
     _: Admin = Depends(Admin.check_sudo_admin),
 ):
     """Add a new node to the database and optionally add it as a host."""
+    from hy2bridge.native_trust import current,certificate_der,NodeCertificateError
+    certificate=new_node.expected_server_certificate
+    if not certificate:
+        raise HTTPException(409,'Подтвердите сертификат управления нового сервера: передайте проверенный PEM в expected_server_certificate. Конфигурация серверу не отправлена')
+    try:certificate_der(certificate)
+    except NodeCertificateError as error:raise HTTPException(422,str(error)) from None
+    if current is None:raise HTTPException(503,'Хранилище доверенных сертификатов нод ещё не готово')
     try:
         dbnode = crud.create_node(db, new_node)
     except IntegrityError:
@@ -63,6 +70,7 @@ def add_node(
             status_code=409, detail=f'Node "{new_node.name}" already exists'
         )
 
+    current.enroll('xray:'+str(dbnode.id),certificate)
     bg.add_task(xray.operations.connect_node, node_id=dbnode.id)
     bg.add_task(add_host_if_needed, new_node, db)
 
@@ -164,8 +172,17 @@ def modify_node(
     _: Admin = Depends(Admin.check_sudo_admin),
 ):
     """Update a node's details. Only accessible to sudo admins."""
-    updated_node = crud.update_node(db, dbnode, modified_node)
-    xray.operations.remove_node(updated_node.id)
+    from hy2bridge.provision import ProvisionError
+    from hy2bridge.native_trust import current,NodeCertificateError
+    if modified_node.expected_server_certificate:
+        if current is None:raise HTTPException(503,'Хранилище доверенных сертификатов нод ещё не готово')
+        try:current.enroll('xray:'+str(dbnode.id),modified_node.expected_server_certificate)
+        except NodeCertificateError as error:raise HTTPException(409,str(error)) from None
+    try:
+        updated_node = crud.update_node(db, dbnode, modified_node)
+    except ProvisionError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from None
+    xray.operations.remove_node(updated_node.id, stop=modified_node.status == NodeStatus.disabled)
     if updated_node.status != NodeStatus.disabled:
         bg.add_task(xray.operations.connect_node, node_id=updated_node.id)
 

@@ -21,6 +21,11 @@ class Observers:
                 node=entry['node'];token=entry['token'];kind=entry['kind']
                 if not re.fullmatch(r'[a-zA-Z0-9:_-]{1,64}',node) or len(token)<32:
                     raise ValueError('Invalid resource observer credential')
+                if db.execute("SELECT 1 FROM sqlite_master WHERE name='fleet_legacy_retired'").fetchone() and db.execute('SELECT 1 FROM fleet_legacy_retired WHERE node=?',(node,)).fetchone():continue
+                current=db.execute('SELECT source FROM fleet_observer_sources WHERE node=?',(node,)).fetchone()
+                if current and current['source']=='provisioned':
+                    continue
+                if kind=='legacy_hy2' and db.execute("SELECT 1 FROM fleet_managed WHERE id=? AND protocol='hysteria2'",(node,)).fetchone():continue
                 if kind=='native':
                     if not re.fullmatch(r'xray:\d+',node) or not db.execute('SELECT 1 FROM nodes WHERE id=?',(int(node[5:]),)).fetchone():
                         raise ValueError('Observer must reference an existing native node')
@@ -59,7 +64,10 @@ class Observers:
         with self.store.connection(write=True) as db:
             if not db.execute('SELECT 1 FROM nodes WHERE id=?',(int(node[5:]),)).fetchone():raise ValueError('Native node missing')
             digest=hashlib.sha256(token.encode()).hexdigest()
+            previous=db.execute('SELECT token_hash FROM fleet_observers WHERE node=?',(node,)).fetchone()
             if db.execute('SELECT 1 FROM fleet_observers WHERE token_hash=? AND node<>?',(digest,node)).fetchone():raise ValueError('Observer credential is already assigned')
             db.execute("INSERT INTO fleet_observers(node,token_hash,kind,domain,port) VALUES(?,?,'native',?,?) ON CONFLICT(node) DO UPDATE SET token_hash=excluded.token_hash,domain=excluded.domain,port=excluded.port",
                 (node,digest,domain,port))
             db.execute("INSERT INTO fleet_observer_sources VALUES(?,'provisioned') ON CONFLICT(node) DO UPDATE SET source='provisioned'",(node,))
+            if previous and previous['token_hash']!=digest and db.execute("SELECT 1 FROM sqlite_master WHERE name='fleet_native_management_sources'").fetchone():
+                db.execute("UPDATE fleet_native_management_sources SET revision=revision+1,ack_revision=0,ack_digest='',ack_at=NULL WHERE node=?",(node,))

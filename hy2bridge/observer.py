@@ -1,5 +1,7 @@
 """Read-only Linux resource observer. Standard library, no VPN configuration access."""
 import argparse
+import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -8,6 +10,7 @@ import signal
 import ssl
 import threading
 import time
+import tempfile
 import urllib.parse
 import urllib.request
 
@@ -96,6 +99,7 @@ class Resources:
 class Sender:
     def __init__(self,config):
         self.url=config['url'];self.token=config['token']
+        self.policy_dir=Path(config['management_policy_dir']) if config.get('management_policy_dir') else None
         parsed=urllib.parse.urlsplit(self.url)
         local_test=bool(config.get('allow_loopback_http') and parsed.scheme=='http' and parsed.hostname in ('127.0.0.1','localhost','::1'))
         if (parsed.scheme!='https' and not local_test) or parsed.username or parsed.password or parsed.query or parsed.fragment:
@@ -106,11 +110,48 @@ class Sender:
             urllib.request.HTTPSHandler(context=ssl.create_default_context(cafile=config.get('ca_file'))))
 
     def send(self,data):
+        data=dict(data)
+        if self.policy_dir:
+            try:
+                ack=json.loads((self.policy_dir/'applied.json').read_text())
+                if type(ack.get('revision')) is int and isinstance(ack.get('digest'),str):
+                    data['management_policy_ack']={'revision':ack['revision'],'digest':ack['digest']}
+            except (OSError,ValueError,TypeError):pass
         request=urllib.request.Request(self.url,data=json.dumps(data).encode(),
             headers={'Authorization':'Bearer '+self.token,'Content-Type':'application/json'})
         with self.opener.open(request,timeout=5) as response:
             result=json.loads(response.read(4096))
         if result.get('received') is not True:raise ValueError('Telemetry was not acknowledged')
+        if self.policy_dir and result.get('management_policy') is not None:
+            self.save_policy(result['management_policy'])
+
+    def save_policy(self,policy):
+        if not isinstance(policy,dict) or type(policy.get('revision')) is not int or policy['revision']<1:
+            raise ValueError('Invalid management source policy')
+        expected=urllib.parse.unquote(urllib.parse.urlsplit(self.url).path.rsplit('/',1)[1])
+        if policy.get('node')!=expected:raise ValueError('Management source policy belongs to another node')
+        sources=policy.get('sources')
+        if not isinstance(sources,list) or not 1<=len(sources)<=64:raise ValueError('Invalid management source list')
+        normalized=sorted({str(ipaddress.IPv4Address(value)) for value in sources})
+        digest=hashlib.sha256(json.dumps(normalized,separators=(',',':')).encode()).hexdigest()
+        if normalized!=sources or policy.get('digest')!=digest:raise ValueError('Invalid management source digest')
+        target=self.policy_dir/'sources.json'
+        if self.policy_dir.is_symlink() or target.is_symlink():raise ValueError('Management source path must be owned')
+        raw=json.dumps({'node':expected,'revision':policy['revision'],'sources':sources,'digest':digest},sort_keys=True)+'\n'
+        if target.is_file() and target.read_text()==raw:return
+        with tempfile.NamedTemporaryFile(mode='w',dir=self.policy_dir,prefix='.sources-',delete=False) as stream:
+            temporary=Path(stream.name)
+            try:
+                stream.write(raw);stream.flush();os.fsync(stream.fileno())
+            except BaseException:
+                temporary.unlink(missing_ok=True);raise
+        try:
+            temporary.replace(target)
+            trigger=self.policy_dir/'refresh'
+            if trigger.is_symlink():raise ValueError('Management source trigger must be owned')
+            with trigger.open('w') as changed:
+                changed.write(str(policy['revision'])+'\n');changed.flush();os.fsync(changed.fileno())
+        finally:temporary.unlink(missing_ok=True)
 
 
 def main():

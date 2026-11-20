@@ -25,6 +25,7 @@ class Node(BaseModel):
 
 
 class NodeCreate(Node):
+    expected_server_certificate: Optional[str] = Field(None,max_length=131072,exclude=True)
     add_as_new_host: bool = True
     model_config = ConfigDict(json_schema_extra={
         "example": {
@@ -39,6 +40,7 @@ class NodeCreate(Node):
 
 
 class NodeModify(Node):
+    expected_server_certificate: Optional[str] = Field(None,max_length=131072,exclude=True)
     name: Optional[str] = Field(None, nullable=True)
     address: Optional[str] = Field(None, nullable=True)
     port: Optional[int] = Field(None, nullable=True)

@@ -12,6 +12,19 @@ import urllib.parse
 import urllib.request
 
 
+def source_epoch(settings):
+    if settings.get('pid_file'):pid=int(Path(settings['pid_file']).read_text())
+    else:
+        service=settings.get('service','hysteria.service')
+        if not re.fullmatch(r'[A-Za-z0-9_.@-]+\.service',service):raise ValueError('Invalid VPN service name')
+        pid=int(subprocess.check_output(['systemctl','show',service,'-p','MainPID','--value'],text=True,timeout=2))
+    data=Path('/proc/'+str(pid)+'/stat').read_text().rsplit(')',1)[1].split()
+    if data[0]=='Z':raise ValueError('VPN process is not running')
+    raw=Path('/proc/sys/kernel/random/boot_id').read_text().strip()+':'+str(pid)+':'+data[19]
+    boot=int(next(line.split()[1] for line in Path('/proc/stat').read_text().splitlines() if line.startswith('btime ')))
+    return hashlib.sha256(raw.encode()).hexdigest(),boot+int(data[19])/os.sysconf('SC_CLK_TCK')
+
+
 class Meters:
     def __init__(self,store,entries=()):
         self.store=store
@@ -31,13 +44,17 @@ class Meters:
                 start_at REAL NOT NULL,end_at REAL NOT NULL,reason TEXT NOT NULL,loss_possible INTEGER NOT NULL)''')
             for entry in entries:
                 if len(entry['token'])<32:raise ValueError('A separate meter credential is required')
+                if db.execute("SELECT 1 FROM sqlite_master WHERE name='fleet_legacy_retired'").fetchone() and db.execute('SELECT 1 FROM fleet_legacy_retired WHERE node=?',(entry['node'],)).fetchone():continue
                 if not db.execute("SELECT 1 FROM fleet_inventory WHERE id=? AND protocol='hysteria2'",(entry['node'],)).fetchone():raise ValueError('Meter node must exist')
+                if db.execute("SELECT 1 FROM sqlite_master WHERE name='fleet_managed'").fetchone() and db.execute("SELECT 1 FROM fleet_managed WHERE id=? AND protocol='hysteria2'",(entry['node'],)).fetchone():continue
                 db.execute('INSERT INTO fleet_meters VALUES(?,?,?) ON CONFLICT(node) DO UPDATE SET token_hash=excluded.token_hash',
                            (entry['node'],hashlib.sha256(entry['token'].encode()).hexdigest(),time.time()))
 
     def authorize(self,node,header):
         if not header.startswith('Bearer '):return False
-        with self.store.connection() as db:row=db.execute('SELECT token_hash FROM fleet_meters WHERE node=?',(node,)).fetchone()
+        with self.store.connection() as db:
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='fleet_managed'").fetchone() and db.execute("SELECT 1 FROM fleet_managed WHERE id=? AND protocol='hysteria2'",(node,)).fetchone():return False
+            row=db.execute('SELECT token_hash FROM fleet_meters WHERE node=?',(node,)).fetchone()
         return bool(row and hmac.compare_digest(row['token_hash'],hashlib.sha256(header[7:].encode()).hexdigest()))
 
     def ingest(self,node,batch,source_at,epoch,counter_started_at=None):
@@ -79,7 +96,11 @@ class Meters:
     def check_health(self):
         now=time.time()
         with self.store.connection(write=True) as db:
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='fleet_node_transfers'").fetchone():
+                db.execute("""UPDATE fleet_events SET resolved_at=?,last_at=? WHERE code='meter_unavailable' AND resolved_at IS NULL
+                    AND node IN(SELECT r.node FROM fleet_legacy_retired r JOIN fleet_node_transfers t ON t.id=r.transfer_id WHERE t.state='succeeded')""",(now,now))
             for row in db.execute('SELECT m.node,m.created_at,s.seen_at FROM fleet_meters m LEFT JOIN fleet_meter_state s ON s.node=m.node').fetchall():
+                if db.execute("SELECT 1 FROM sqlite_master WHERE name='fleet_managed'").fetchone() and db.execute("SELECT 1 FROM fleet_managed WHERE id=? AND protocol='hysteria2'",(row['node'],)).fetchone():continue
                 seen=row['seen_at'] or row['created_at']
                 if now-seen<=30:continue
                 old=db.execute("SELECT id FROM fleet_events WHERE node=? AND code='meter_unavailable' AND resolved_at IS NULL",(row['node'],)).fetchone()
@@ -108,16 +129,7 @@ class MeterAgent:
             urllib.request.HTTPSHandler(context=ssl.create_default_context(cafile=self.settings.get('ca_file'))))
 
     def epoch(self):
-        if self.settings.get('pid_file'):pid=int(Path(self.settings['pid_file']).read_text())
-        else:
-            service=self.settings.get('service','hysteria.service')
-            if not re.fullmatch(r'[A-Za-z0-9_.@-]+\.service',service):raise ValueError('Invalid VPN service name')
-            pid=int(subprocess.check_output(['systemctl','show',service,'-p','MainPID','--value'],text=True,timeout=2))
-        data=Path('/proc/'+str(pid)+'/stat').read_text().rsplit(')',1)[1].split()
-        if data[0]=='Z':raise ValueError('VPN process is not running')
-        raw=Path('/proc/sys/kernel/random/boot_id').read_text().strip()+':'+str(pid)+':'+data[19]
-        boot=int(next(line.split()[1] for line in Path('/proc/stat').read_text().splitlines() if line.startswith('btime ')))
-        return hashlib.sha256(raw.encode()).hexdigest(),boot+int(data[19])/os.sysconf('SC_CLK_TCK')
+        return source_epoch(self.settings)
 
     def cycle(self):
         epoch,started=self.epoch();request=urllib.request.Request(self.config['stats_url'].rstrip('/')+'/traffic',headers={'Authorization':self.config['stats_secret']})

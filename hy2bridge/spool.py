@@ -45,3 +45,7 @@ class Spool:
                     auth:{'tx':tx,'rx':rx} for auth,tx,rx in db.execute('SELECT * FROM totals')}}
         finally:
             db.close()
+
+    def charged(self):
+        with closing(self.db()) as db:
+            return {auth:tx+rx for auth,tx,rx in db.execute('SELECT * FROM totals')}

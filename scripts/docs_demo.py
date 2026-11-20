@@ -1,15 +1,17 @@
-"""Loopback-only, read-only API fixtures for screenshots of the real Rime UI.
+"""Loopback-only API fixtures and in-memory UI demonstrations.
 
 Uses no database, environment credentials, VPN processes or outbound requests.
 All names, addresses, counters and event histories below are synthetic.
 """
 import argparse
+import base64
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import math
 import mimetypes
 from pathlib import Path
+import secrets
 import time
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -17,6 +19,19 @@ WEB = Path(__file__).resolve().parents[1] / 'hy2bridge' / 'web'
 GIB = 1024 ** 3
 NAMES = ['demo_alex', 'demo_anna', 'demo_daria', 'demo_ivan', 'demo_kate', 'demo_leo', 'demo_maria', 'demo_max']
 SERVERS = [('eu-west', 'Amsterdam', 'xray'), ('eu-north', 'Helsinki', 'hysteria2'), ('eu-central', 'Frankfurt', 'hysteria2')]
+
+
+def update_demo(server, now):
+    started = getattr(server, 'update_started', None)
+    phases = ['checking', 'downloading', 'backup', 'installing', 'verifying', 'succeeded']
+    phase = phases[min(5, int((now - started) / 2))] if started else None
+    latest = {'id': 'synthetic-release', 'tag': 'v0.9.1', 'version': '0.9.1', 'published_at': '2026-11-14T10:00:00Z',
+              'notes': 'Более быстрые отчёты по трафику.\nПроверка VPN по текущему DNS.\nУлучшенная навигация на телефоне.'}
+    job = {'id': 'synthetic-update', 'version': '0.9.1', 'phase': phase, 'progress': 64} if phase else {}
+    return {'demo':True,'current_version': '0.9.1' if phase == 'succeeded' else '0.9.0', 'enabled': True,
+            'checked_at': now if getattr(server, 'update_checked', False) else None,
+            'latest': latest if getattr(server, 'update_checked', False) else None,
+            'available': getattr(server, 'update_checked', False) and phase != 'succeeded', 'job': job}
 
 
 def users(now):
@@ -56,12 +71,14 @@ def nodes(now):
                  'core_version':'demo','accounting_durable':protocol=='hysteria2','net_rx_bytes':28*GIB,'net_tx_bytes':110*GIB}
         result.append({'id':node,'name':name,'address':node+'.example.invalid','protocol':protocol,
                        'state':'degraded' if i==1 else 'healthy','seen_at':now-4-i,'age_seconds':4+i,
-                       'enabled':True,'metrics':metrics,'quota':quota(node,now,[34,52,83][i]),'status_source':'demo'})
+                       'enabled':True,'metrics':metrics,'quota':quota(node,now,[34,52,83][i]),'status_source':'demo',
+                       'client_access':{'state':'unavailable' if i==1 else 'available','checked_at':now-8,
+                                        'origin':'Демонстрационная проверка','target_ip':'192.0.2.'+str(10+i)}})
     result.append({'id':'xray:local','name':'Сервер панели','address':'panel.example.invalid','role':'panel','protocol':'xray',
                    'state':'healthy','seen_at':now-2,'age_seconds':2,'enabled':True,'status_source':'demo',
                    'metrics':{'cpu_percent':7,'cpu_load1':.14,'mem_total_bytes':4*GIB,'mem_available_bytes':3.1*GIB,
                               'disk_total_bytes':60*GIB,'disk_free_bytes':44*GIB,'service_healthy':True,'core_version':'demo'},
-                   'panel':{'version':'0.2.0-rc6','uptime_seconds':172800,'host_uptime_seconds':864000,
+                   'panel':{'version':'0.9.0','uptime_seconds':172800,'host_uptime_seconds':864000,
                             'process_memory_bytes':140*1024**2,'hostname':'demo-panel'},'quota':{'enabled':False}})
     return result
 
@@ -91,10 +108,31 @@ def traffic(now,query):
         series.setdefault(row['hour'],{'hour':row['hour'],'hysteria2':0,'xray':0})[row['protocol']]+=row['total']
         totals[row['protocol']]+=row['total']
         by_user.setdefault(row['username'],{'username':row['username'],'hysteria2':0,'xray':0})[row['protocol']]+=row['total']
-    return {'total':sum(totals.values()),'totals':totals,'series':list(series.values()),'rows':rows,
+    report = {'total':sum(totals.values()),'totals':totals,'series':list(series.values()),'rows':rows,
             'users':sorted(by_user.values(),key=lambda u:-u['hysteria2']-u['xray']),
             'hy2_first_sample_hour':next(iter(series),None),'hy2_upload_bytes':sum(r['tx'] or 0 for r in rows),
             'hy2_download_bytes':sum(r['rx'] or 0 for r in rows),'gaps':[]}
+    grouping = query.get('group_by',['protocol'])[0]
+    if grouping in ['node','tag','user']:
+        tags = {user['username']:user['tags'][0] for user in members}
+        names = {node:name for node,name,_ in SERVERS}
+        identities = [(row['node'] if grouping=='node' else tags[row['username']] if grouping=='tag' else row['username']) for row in rows]
+        ranked = {}
+        for identity,row in zip(identities,rows):
+            ranked[identity] = ranked.get(identity,0)+row['total']
+        leaders = sorted(ranked,key=lambda key:(-ranked[key],key))
+        leaders = leaders[:5] if len(leaders)>6 else leaders
+        mapping = {identity:'g'+str(index) for index,identity in enumerate(leaders)}
+        groups = [{'key':mapping[identity],'label':names.get(identity,identity),'total':ranked[identity]} for identity in leaders]
+        if len(ranked)>6:
+            groups.append({'key':'other','label':'Остальные','total':sum(value for key,value in ranked.items() if key not in mapping)})
+        grouped = {hour:{'hour':hour,**{group['key']:None for group in groups}} for hour in series}
+        for identity,row in zip(identities,rows):
+            key = mapping.get(identity,'other')
+            grouped[row['hour']][key] = (grouped[row['hour']][key] or 0)+row['total']
+        report.update(chart_groups=groups,chart_series=list(grouped.values()),chart_group_count=len(ranked),
+            chart_has_other=len(ranked)>6,chart_note='Демонстрационные группы и вымышленный расход.')
+    return report
 
 
 def history(now,selected):
@@ -108,6 +146,99 @@ def history(now,selected):
     return rows
 
 
+def relay_demo(server,now):
+    entry={'id':'a'*32,'name':'Zurich entry','host':'entry.example.com','address':'203.0.113.10','domain':'entry.example.com',
+        'control_port':62080,'metrics_port':62081,'ssh_port':22,'username':'root','state':'active','created_at':now-86400,
+        'seen_at':now-6,'fresh':True,'health':{'cpu_percent':12,'mem_available_bytes':3*GIB,'disk_free_bytes':24*GIB}}
+    if not hasattr(server,'demo_entries'):
+        second={**entry,'id':'9'*32,'name':'Helsinki entry','host':'entry-north.example.com',
+                'address':'203.0.113.11','domain':'entry-north.example.com'}
+        server.demo_entries=[entry,second]
+    for value in server.demo_entries:
+        available=value['state']=='active'
+        value.update(seen_at=now-6 if available else now-3600,fresh=available)
+    if not hasattr(server,'demo_routes'):
+        server.demo_routes=[{'id':'b'*32,'node':'eu-west','entry':'a'*32,'entry_name':entry['name'],'entry_domain':entry['domain'],
+            'origin':'203.0.113.20','state':'active','created_at':now-3600,'checked_at':now-12,'result':{'passed':True},
+            'services':[{'id':'e'*32,'kind':'vpn','proxy':None,'protocol':'tcp','origin_port':443,'public_port':10443,'state':'active','traffic':{'rx':31*GIB,'tx':4*GIB}},
+                {'id':'f'*32,'kind':'proxy','mode':'http','proxy':'c'*32,'protocol':'tcp','origin_port':3128,'public_port':13128,'state':'active','traffic':{'rx':2*GIB,'tx':GIB//3}},
+                {'id':'8'*32,'kind':'proxy','mode':'https','proxy':'c'*32,'protocol':'tcp','origin_port':8443,'public_port':18443,'state':'active','traffic':{'rx':GIB,'tx':GIB//8}}]}]
+    for route in server.demo_routes:route['checked_at']=now-12
+    for route in server.demo_routes:
+        route['result'].update(vpn_passed=True,proxies_passed=True,ssh_passed=True,
+            services=[{'kind':service['kind'],'origin_port':service['origin_port'],'passed':True,'stage':'payload'} for service in route['services']])
+    return {'enabled':True,'runtime_available':True,'entries':server.demo_entries,'tunnels':server.demo_routes}
+
+
+def console_nodes(server,now):
+    values=nodes(now)
+    for node in values:
+        route=next((route for route in relay_demo(server,now)['tunnels'] if route['node']==node['id']),None)
+        if route:node['tunnel_access']={'active':True,'fresh':True,'passed':True,'vpn_passed':True,'proxies_passed':True,
+            'entry_name':route['entry_name'],'domain':route['entry_domain'],'origin':route['origin'],'checked_at':now-12,
+            'management':any(service['kind']=='management' for service in route['services'])}
+    return values
+
+
+def proxy_demo(server,node):
+    if node!='eu-west' or getattr(server,'proxy_deleted',False):return []
+    route=next((route for route in relay_demo(server,time.time())['tunnels'] if route['node']==node),None)
+    endpoints={service['mode']:{'host':route['entry_domain'],'port':service['public_port'],'entry':route['entry_name']}
+               for service in route['services'] if service['kind']=='proxy' and service.get('mode')} if route else {}
+    return [{'id':'c'*32,'node':node,'address':'203.0.113.20','domain':'node.example.com','http_port':3128,'https_port':8443,
+        'username':'demo_proxy','created_at':time.time()-86400,'checked_at':time.time()-30,'result':{'passed':True},
+        'stale':False,'deployment_state':'succeeded','credentials_available':True,'edit_allowed':True,'locked_domain':True,
+        'endpoints':endpoints}]
+
+
+def operation_demo(server,identity,now):
+    job=getattr(server,'demo_jobs',{}).get(identity)
+    if not job:return {'detail':'Demo job not found'}
+    labels=['Проверка доступа к серверу','Сохранение конфигурации','Применение изменений','Проверка реального трафика','Результат сохранён']
+    if job['kind']=='route-switch':
+        labels=['Проверка нового входа','Сохранение текущего маршрута','Создание правил нового входа',
+                'Проверка VPN и прокси','Публикация нового входа','Очистка прежних правил','Смена входа завершена']
+    index=min(len(labels)-1,int((now-job['started'])/1.5))
+    state='succeeded' if index==len(labels)-1 else 'running'
+    if state=='succeeded' and job['kind']=='route-switch' and not job.get('applied'):
+        job['applied']=True
+        catalog=relay_demo(server,now)
+        selected=next(entry for entry in catalog['entries'] if entry['id']==job['plan']['entry'])
+        route=next(route for route in server.demo_routes if route['id']==job['plan']['route_id'])
+        route.update(entry=selected['id'],entry_name=selected['name'],entry_domain=selected['domain'],
+                     old_cleanup_pending=job['plan'].get('old_offline',False))
+        if route['old_cleanup_pending']:
+            route['pending_cleanup_count']=1
+            previous=next(entry for entry in catalog['entries'] if entry['id']!=selected['id'])
+            previous['pending_cleanup_count']=1
+    if state=='succeeded' and job['kind']=='proxy-delete':
+        server.proxy_deleted=True
+        for route in relay_demo(server,now)['tunnels']:route['services']=[value for value in route['services'] if value['kind']!='proxy']
+    if state=='succeeded' and job['kind']=='route-delete':
+        server.demo_routes=[route for route in relay_demo(server,now)['tunnels'] if route['id']!=job['target']]
+    if state=='succeeded' and job['kind']=='route-add' and not job.get('applied'):
+        job['applied']=True
+        selected=next(entry for entry in relay_demo(server,now)['entries'] if entry['id']==job['plan']['entry'])
+        server.demo_routes.append({'id':identity,'node':job['node'],'entry':selected['id'],'entry_name':selected['name'],'entry_domain':selected['domain'],
+            'origin':'203.0.113.30','state':'active','checked_at':now,'result':{'passed':True},'services':[
+                {'id':'d'*32,'kind':'vpn','proxy':None,'protocol':'udp','origin_port':443,'public_port':443,'state':'active','traffic':{'rx':0,'tx':0}}]})
+    if state=='succeeded' and job['kind']=='entry-add' and not job.get('applied'):
+        job['applied']=True
+        entry=dict(relay_demo(server,now)['entries'][0]) if server.demo_entries else {'health':{},'state':'active','fresh':True}
+        entry.update(id=identity,name=job['plan']['name'],host=job['plan']['host'],domain=job['plan']['domain'],address='203.0.113.20',ssh_port=22,username='root',seen_at=now-6)
+        server.demo_entries.append(entry)
+    if state=='succeeded' and job['kind']=='entry-remove':
+        relay_demo(server,now)
+        server.demo_entries=[entry for entry in server.demo_entries if entry['id']!=job['plan']['target']]
+    context={'operation':job['kind']}
+    if job['kind']=='route-switch':
+        context.update(progress={'completed':len(labels) if state=='succeeded' else index,
+                                 'total':len(labels),'phase':'complete' if state=='succeeded' else str(index),'label':labels[index]},
+                       old_cleanup_pending=state=='succeeded' and job['plan'].get('old_offline',False))
+    return {'id':identity,'state':state,'message':labels[index],
+            'steps':[{'message':label} for label in labels[:index+1]],'context':context}
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self,*args):pass
 
@@ -119,15 +250,100 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         length=int(self.headers.get('Content-Length',0))
         if length>4096:return self.send({'detail':'Request too large'},413)
-        self.rfile.read(length)
-        if self.path=='/api/admin/token':return self.send({'access_token':'synthetic-demo-token','token_type':'bearer'})
+        raw=self.rfile.read(length)
+        try:data=json.loads(raw)
+        except ValueError:data={}
+        if self.path=='/api/admin/token':
+            payload=base64.urlsafe_b64encode(json.dumps({'sub':'demo','exp':time.time()+3600}).encode()).decode().rstrip('=')
+            return self.send({'access_token':'demo.'+payload+'.synthetic','token_type':'bearer'})
+        if self.path=='/api/system/updates/check':
+            self.server.update_checked=True
+            return self.send(update_demo(self.server,time.time()))
+        if self.path=='/api/system/updates':
+            self.server.update_started=time.time()
+            return self.send(update_demo(self.server,time.time()))
+        if self.path=='/api/fleet/provision/host-key':return self.send({'address':'203.0.113.20','fingerprint':'SHA256:'+'a'*43})
+        if self.path.endswith('/delete/plan'):
+            return self.send({'id':'d'*32,'ready':True,'summary':{'HTTP':3128,'HTTPS':8443,'Туннельных правил':1}})
+        if self.path in ['/api/fleet/proxy/delete/deploy','/api/fleet/relays/deploy']:
+            if not hasattr(self.server,'demo_jobs'):self.server.demo_jobs={}
+            identity=data['plan_id'];plan=getattr(self.server,'demo_plans',{}).get(identity,{})
+            kind='proxy-delete' if '/proxy/' in self.path else plan.get('kind','route-add')
+            self.server.demo_jobs[identity]={'kind':kind,'plan':plan,'started':time.time(),'node':plan.get('node','eu-north')}
+            return self.send({'id':identity})
+        if self.path.startswith('/api/fleet/relays/routes/') and self.path.endswith('/switch/plan'):
+            catalog=relay_demo(self.server,time.time())
+            route=next((route for route in catalog['tunnels'] if route['id']==self.path.split('/')[-3]),None)
+            selected=next((entry for entry in catalog['entries'] if entry['id']==data.get('entry') and entry['state']=='active'),None)
+            if not route or not selected or selected['id']==route['entry']:
+                return self.send({'detail':'Выберите другой готовый входной сервер'},409)
+            if not hasattr(self.server,'demo_plans'):self.server.demo_plans={}
+            identity=secrets.token_hex(16)
+            previous=next(entry for entry in catalog['entries'] if entry['id']==route['entry'])
+            self.server.demo_plans[identity]={'kind':'route-switch','route_id':route['id'],
+                'node':route['node'],'entry':selected['id'],'old_offline':previous['state']!='active'}
+            entry_fields=['id','name','domain']
+            return self.send({'id':identity,'kind':'route-switch','route_id':route['id'],'node':route['node'],
+                'name':next((name for key,name,protocol in SERVERS if key==route['node']),route['node']),
+                'from_entry':{key:previous[key] for key in entry_fields},
+                'to_entry':{key:selected[key] for key in entry_fields},'entry_name':selected['name'],
+                'domain':selected['domain'],'origin':route['origin'],'ready':True,
+                'message':'Новый вход будет проверен перед переключением. Обновите прежнюю подписку в клиенте.',
+                'services':route['services']})
+        if self.path=='/api/fleet/relays/route/plan':
+            if not hasattr(self.server,'demo_plans'):self.server.demo_plans={}
+            identity=secrets.token_hex(16)
+            self.server.demo_plans[identity]={'kind':'route-add','node':data['node'],'entry':data['entry']}
+            return self.send({'id':identity,'kind':'route','node':data['node'],'name':next((name for key,name,protocol in SERVERS if key==data['node']),data['node']),'entry_name':next(entry['name'] for entry in relay_demo(self.server,time.time())['entries'] if entry['id']==data['entry']),
+                'origin':'203.0.113.30','ready':True,'message':'Ключи и URL подписок сохранятся. Обновите подписку для получения входного адреса.',
+                'services':[{'kind':'VPN','origin_port':443,'public_port':443,'protocol':'udp'}]})
+        if self.path=='/api/fleet/relays/entry/plan':
+            if not hasattr(self.server,'demo_plans'):self.server.demo_plans={}
+            identity=secrets.token_hex(16)
+            self.server.demo_plans[identity]={'kind':'entry-add',**{key:data[key] for key in ['name','domain','host']}}
+            return self.send({'id':identity,'kind':'entry','name':data['name'],'domain':data['domain'],'address':'203.0.113.20','ready':True,'message':'Будет установлен отдельный входной сервер.'})
+        if self.path.startswith('/api/fleet/relays/entry/') and self.path.endswith('/remove/plan'):
+            if not hasattr(self.server,'demo_plans'):self.server.demo_plans={}
+            target=self.path.split('/')[-3];identity=secrets.token_hex(16)
+            entry=next(entry for entry in relay_demo(self.server,time.time())['entries'] if entry['id']==target)
+            self.server.demo_plans[identity]={'kind':'entry-remove','target':target}
+            return self.send({'id':identity,'kind':'entry-remove','ready':True,'domain':entry['domain'],'address':entry['address'],
+                'message':'Будут удалены служба туннеля и сборщик выбранного входа.'})
+        if self.path.startswith('/api/fleet/relays/entry/') and self.path.endswith('/check'):
+            if not hasattr(self.server,'demo_jobs'):self.server.demo_jobs={}
+            identity=secrets.token_hex(16);self.server.demo_jobs[identity]={'kind':'entry-check','started':time.time()}
+            return self.send({'id':identity})
+        if self.path.startswith('/api/fleet/relays/routes/') and self.path.endswith('/check'):
+            if not hasattr(self.server,'demo_jobs'):self.server.demo_jobs={}
+            identity=secrets.token_hex(16);self.server.demo_jobs[identity]={'kind':'route-check','started':time.time()}
+            return self.send({'id':identity})
         self.send({'detail':'Демо доступно только для просмотра'},405)
 
     def do_PUT(self):self.send({'detail':'Демо доступно только для просмотра'},405)
-    do_DELETE=do_PUT
+    def do_DELETE(self):
+        if self.path.startswith('/api/fleet/relays/routes/'):
+            if not hasattr(self.server,'demo_jobs'):self.server.demo_jobs={}
+            identity='7'*32
+            self.server.demo_jobs[identity]={'kind':'route-delete','target':self.path.rsplit('/',1)[-1],'started':time.time()}
+            return self.send({'id':identity})
+        self.send({'detail':'Демо доступно только для просмотра'},405)
 
     def do_GET(self):
         url=urlsplit(self.path);path=unquote(url.path);query=parse_qs(url.query);now=time.time()
+        if path=='/api/system/updates':return self.send(update_demo(self.server,now))
+        if path=='/api/fleet/relays':return self.send(relay_demo(self.server,now))
+        if path.startswith('/api/fleet/relays/jobs/') or path.startswith('/api/fleet/proxy/jobs/'):
+            return self.send(operation_demo(self.server,path.rsplit('/',1)[-1],now))
+        if path.endswith('/delete/options'):
+            return self.send({'node':'eu-west','host':'node.example.com','ssh_port':22,'username':'root','fingerprint':'SHA256:'+'a'*43,'http_port':3128,'https_port':8443})
+        if path=='/api/fleet/proxy/options':return self.send({'enabled':True,'automatic_tls':True})
+        if path.endswith('/connection') and '/proxy/' in path:
+            services=proxy_demo(self.server,'eu-west')
+            endpoints=services[0]['endpoints'] if services else {}
+            urls={mode:mode+'://demo_proxy:synthetic-demo-only@'+value['host']+':'+str(value['port'])
+                  for mode,value in endpoints.items()}
+            return self.send({'id':'c'*32,'node':'eu-west','deployment_state':'succeeded','credentials_available':True,'needs_password':False,
+                'urls':urls})
         if path in ('/','/fleet','/fleet/'):
             html=(WEB/'index.html').read_text(encoding='utf-8').replace('<body>','<body><div class="demo-label">DEMO · Вымышленные пользователи, ноды и метрики</div>')
             return self.send(html.encode(),mime='text/html; charset=utf-8')
@@ -136,7 +352,7 @@ class Handler(BaseHTTPRequestHandler):
             if WEB.resolve() not in target.parents or not target.is_file():return self.send({},404)
             return self.send(target.read_bytes(),mime=mimetypes.guess_type(target.name)[0] or 'application/octet-stream')
         if path=='/api/fleet/overview':
-            values=nodes(now);return self.send({'nodes':values,'summary':{s:sum(n['state']==s for n in values) for s in ['healthy','offline','degraded','unknown']},'events':events(now)})
+            values=console_nodes(self.server,now);return self.send({'nodes':values,'summary':{s:sum(n['state']==s for n in values) for s in ['healthy','offline','degraded','unknown']},'events':events(now)})
         if path=='/api/fleet/events':return self.send(events(now))
         if path=='/api/fleet/tags':return self.send([{'tag':t,'users':sum(t in u['tags'] for u in users(now))} for t in ['family','team','trial']])
         if path=='/api/fleet/users':
@@ -146,12 +362,14 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(next((u for u in users(now) if u['username']==path.rsplit('/',1)[-1]),{}))
         if path=='/api/fleet/traffic':return self.send(traffic(now,query))
         if path=='/api/fleet/monitoring':
-            selected=[n for n in nodes(now) if not query.get('node') or n['id']==query['node'][0]]
+            selected=[n for n in console_nodes(self.server,now) if not query.get('node') or n['id']==query['node'][0]]
             return self.send({'nodes':selected,'history':history(now,selected),'generated_at':now,'retention_days':7,'sample_seconds':60})
         if path.startswith('/api/fleet/nodes/'):
             parts=path.removeprefix('/api/fleet/nodes/').split('/')
-            node=next((n for n in nodes(now) if n['id']==parts[0]),None)
+            node=next((n for n in console_nodes(self.server,now) if n['id']==parts[0]),None)
             if node is None:return self.send({},404)
+            if parts[1:]==['proxies']:return self.send(proxy_demo(self.server,node['id']))
+            if parts[1:]==['proxy-access']:return self.send({'host':node['address'],'ssh_port':22,'username':'root','fingerprint':'SHA256:'+'a'*43})
             if parts[1:]==['connections']:
                 total=node['metrics'].get('online_connections',0);native=node['protocol']=='xray'
                 count=2 if native else node['metrics']['online_users']

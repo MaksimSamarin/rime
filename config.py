@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from decouple import config
 from dotenv import load_dotenv
 
@@ -29,7 +31,9 @@ XRAY_JSON = config("XRAY_JSON", default="./xray_config.json")
 XRAY_FALLBACKS_INBOUND_TAG = config("XRAY_FALLBACKS_INBOUND_TAG", cast=str, default="") or config(
     "XRAY_FALLBACK_INBOUND_TAG", cast=str, default=""
 )
-XRAY_EXECUTABLE_PATH = config("XRAY_EXECUTABLE_PATH", default="/usr/local/bin/xray")
+_qualified_hub = next((value for value in ('/opt/rime-hub/xray','/opt/rime-probe/xray')
+                       if Path(value).is_file()), '/usr/local/bin/xray')
+XRAY_EXECUTABLE_PATH = config("XRAY_EXECUTABLE_PATH", default=_qualified_hub)
 XRAY_ASSETS_PATH = config("XRAY_ASSETS_PATH", default="/usr/local/share/xray")
 XRAY_EXCLUDE_INBOUND_TAGS = config("XRAY_EXCLUDE_INBOUND_TAGS", default='').split()
 XRAY_SUBSCRIPTION_URL_PREFIX = config("XRAY_SUBSCRIPTION_URL_PREFIX", default="").strip("/")

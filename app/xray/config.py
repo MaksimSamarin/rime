@@ -14,6 +14,7 @@ from app.db import models as db_models
 from app.models.proxy import ProxyTypes
 from app.models.user import UserStatus
 from app.utils.crypto import get_cert_SANs
+from app.xray.api_security import protect_hub_api
 from config import DEBUG, XRAY_EXCLUDE_INBOUND_TAGS, XRAY_FALLBACKS_INBOUND_TAG
 
 
@@ -62,22 +63,6 @@ class XRayConfig(dict):
         self._apply_api()
 
     def _apply_api(self):
-        api_inbound = self.get_inbound("API_INBOUND")
-        if api_inbound:
-            api_inbound["listen"] = self.api_host
-            api_inbound["listen"]["address"] = self.api_host
-            api_inbound["port"] = self.api_port
-            return
-
-        self["api"] = {
-            "services": [
-                "HandlerService",
-                "StatsService",
-                "LoggerService"
-            ],
-            "tag": "API"
-        }
-        self["stats"] = {}
         forced_policies = {
             "levels": {
                 "0": {
@@ -96,33 +81,7 @@ class XRayConfig(dict):
             self["policy"] = merge_dicts(self.get("policy"), forced_policies)
         else:
             self["policy"] = forced_policies
-        inbound = {
-            "listen": self.api_host,
-            "port": self.api_port,
-            "protocol": "dokodemo-door",
-            "settings": {
-                "address": self.api_host
-            },
-            "tag": "API_INBOUND"
-        }
-        try:
-            self["inbounds"].insert(0, inbound)
-        except KeyError:
-            self["inbounds"] = []
-            self["inbounds"].insert(0, inbound)
-
-        rule = {
-            "inboundTag": [
-                "API_INBOUND"
-            ],
-            "outboundTag": "API",
-            "type": "field"
-        }
-        try:
-            self["routing"]["rules"].insert(0, rule)
-        except KeyError:
-            self["routing"] = {"rules": []}
-            self["routing"]["rules"].insert(0, rule)
+        protect_hub_api(self)
 
     def _validate(self):
         if not self.get("inbounds"):

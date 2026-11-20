@@ -13,6 +13,37 @@ class OperationsTests(unittest.TestCase):
     tearDown=test_accounting.AccountingTests.tearDown
     batch=test_accounting.AccountingTests.batch
 
+    def test_compact_traffic_preserves_totals_and_groupings_without_raw_rows(self):
+        self.store.ingest('n1',self.batch())
+        self.store.ingest('n2',self.batch(tx=40,rx=60))
+        ops=Operations(self.store);now=datetime.now(timezone.utc)
+        full=ops.traffic(now-timedelta(days=1),now+timedelta(hours=1))
+        compact=ops.traffic(now-timedelta(days=1),now+timedelta(hours=1),detail=False)
+        self.assertTrue(full['rows']);self.assertEqual(compact['rows'],[])
+        self.assertEqual(compact['row_count'],len(full['rows']))
+        for key in ['total','totals','series','users','nodes','hy2_upload_bytes','hy2_download_bytes']:
+            self.assertEqual(compact[key],full[key])
+        self.assertEqual(sum(r['total'] for r in compact['nodes']),compact['total'])
+
+    def test_retention_keeps_open_incidents_and_accounting(self):
+        self.store.ingest('n1',self.batch());ops=Operations(self.store)
+        with connect(self.path) as db:
+            db.executemany('INSERT INTO fleet_events(node,code,severity,first_at,last_at,resolved_at) VALUES(?,?,?,?,?,?)',
+                [('n1','stats_unavailable','error',1,1,None),('n1','heartbeat_stale','error',1,1,2),('n1','heartbeat_stale','error',4000000,4000000,4000001)])
+        ops.prune(now=4000002)
+        with connect(self.path) as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM fleet_events').fetchone()[0],2)
+            self.assertEqual(db.execute('SELECT used_traffic FROM users').fetchone()[0],300)
+
+    def test_repeated_stale_gaps_coalesce_instead_of_growing_rows(self):
+        ops=Operations(self.store);ops.ensure_node('n1');ops.heartbeat('n1',{})
+        for _ in range(5):
+            with connect(self.path) as db:db.execute('UPDATE fleet_health SET seen_at=?',(time.time()-60,))
+            ops.heartbeat('n1',{})
+        with connect(self.path) as db:
+            row=db.execute("SELECT COUNT(*),SUM(occurrences) FROM fleet_events WHERE code='heartbeat_stale'").fetchone()
+            self.assertEqual(row,(1,5))
+
     def test_native_probe_does_not_hold_database_read_lock(self):
         with connect(self.path) as db:
             db.execute('CREATE TABLE nodes(id INTEGER,name TEXT,address TEXT,status TEXT,message TEXT,xray_version TEXT,last_status_change TEXT)')

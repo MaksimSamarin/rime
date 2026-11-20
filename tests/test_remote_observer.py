@@ -17,7 +17,9 @@ class RemoteObserverTests(unittest.TestCase):
                 if args[:2]==['docker','inspect']:return json.dumps([main if args[2]=='fleet-'+job else observer])
                 if args[:2]==['docker','run']:created.append(args);return 'test-container'
                 raise AssertionError(args)
-            def inspect(args,**kwargs):return SimpleNamespace(returncode=0 if created else 1,stdout=json.dumps([observer]) if created else '')
+            def inspect(args,**kwargs):
+                if args[:3]==['docker','image','inspect']:return SimpleNamespace(returncode=0,stdout='[]',stderr='')
+                return SimpleNamespace(returncode=0 if created else 1,stdout=json.dumps([observer]) if created else '',stderr='')
             config={'action':'observer','id':job,'files':files,'image':'node@sha256:'+'0'*64}
             with patch.object(Path,'home',return_value=root),patch.object(remote_install,'run',side_effect=run),patch.object(remote_install.subprocess,'run',side_effect=inspect),patch.object(remote_install.os,'getuid',return_value=1000,create=True),patch.object(remote_install.os,'getgid',return_value=1000,create=True):
                 self.assertFalse(remote_install.main(config)['already_configured'])

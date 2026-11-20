@@ -76,7 +76,8 @@ class Stats(XRayBase):
     def query_stats(self, pattern: str, reset: bool = False, timeout: int = None) -> typing.Iterable[StatResponse]:
         try:
             stub = command_pb2_grpc.StatsServiceStub(self._channel)
-            r = stub.QueryStats(command_pb2.QueryStatsRequest(pattern=pattern, reset=reset), timeout=timeout)
+            with self.control_lock:
+                r = stub.QueryStats(command_pb2.QueryStatsRequest(pattern=pattern, reset=reset), timeout=timeout)
 
         except grpc.RpcError as e:
             raise RelatedError(e)
