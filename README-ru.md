@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img alt="Версия 0.9.1" src="https://img.shields.io/badge/version-0.9.1-7dd3fc?style=flat-square">
+  <img alt="Версия 0.9.2" src="https://img.shields.io/badge/version-0.9.2-7dd3fc?style=flat-square">
   <img alt="Лицензия AGPL-3.0" src="https://img.shields.io/badge/license-AGPL--3.0-0369a1?style=flat-square">
   <img alt="Xray 26.6.1" src="https://img.shields.io/badge/Xray-26.6.1-111923?style=flat-square">
   <img alt="Hysteria2" src="https://img.shields.io/badge/Hysteria2-supported-111923?style=flat-square">
@@ -152,7 +152,7 @@ ssh -L 8000:localhost:8000 user@your-server
 ```sh
 sha256sum -c SHA256SUMS
 docker load -i rime-linux-amd64.tar.gz
-docker tag rime:0.9.1 rime:current
+docker tag rime:0.9.2 rime:current
 docker compose up -d
 ```
 
@@ -189,7 +189,7 @@ sudo python3 scripts/install_updater.py
 | [Сборщики ресурсов](docs/RESOURCE_OBSERVERS.md) и [смысл метрик](docs/TRAFFIC_AND_CONNECTIONS.md) | Что означает каждая метрика и откуда она берётся |
 | [Проверки](docs/TESTING.md) | Закрытые приёмочные проверки релизов |
 | [CLI](cli/README.md) и [участие в проекте](CONTRIBUTING.md) | Командная строка и порядок отправки изменений |
-| [Что нового в 0.9.1](docs/RELEASE-0.9.1.md) и [в 0.9.0](docs/RELEASE-0.9.0.md) | Изменения последних версий |
+| [Что нового в 0.9.2](docs/RELEASE-0.9.2.md), [в 0.9.1](docs/RELEASE-0.9.1.md) и [в 0.9.0](docs/RELEASE-0.9.0.md) | Изменения последних версий |
 
 ## Ограничения
 

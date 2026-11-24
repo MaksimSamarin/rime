@@ -17,6 +17,7 @@ import shlex
 import sys
 import time
 DIAGNOSTIC=None
+MANAGEMENT_IDENTITY_TIMEOUT = 30
 
 if globals().get('__package__'):
     from .port_check import port_checks
@@ -164,6 +165,22 @@ def remove_transfers(directory,job):
         if path.exists():
             if not path.is_file():raise RuntimeError('Transfer path is not a regular file')
             path.unlink()
+
+
+def management_identity(directory):
+    certificate = directory / 'node-cert.pem'
+    key = directory / 'node-key.pem'
+    try:
+        if any(path.is_symlink() or not path.is_file() or not 0 < path.stat().st_size < 131072
+               for path in (certificate, key)):
+            return None
+        # Docker reports Running before the node finishes creating its TLS pair.
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(certificate, key, password='')
+        return {'certificate': certificate.read_text(encoding='ascii'),
+                'key': key.read_text(encoding='ascii')}
+    except (OSError, UnicodeError):
+        return None
 
 
 def main(c):
@@ -328,19 +345,30 @@ def main(c):
     management_auth = control_firewall(c,directory,image=image)
     try:run(args)
     except RuntimeError as exc:raise RemoteError('container_start_failed') from exc
+    deadline = time.monotonic() + MANAGEMENT_IDENTITY_TIMEOUT
     time.sleep(2)
-    info=json.loads(run(['docker','inspect',name]))[0]
-    if not info['State']['Running']:
+    export_identity = c.get('export_identity')
+    identity = None
+    while True:
+        info = json.loads(run(['docker', 'inspect', name]))[0]
+        if not export_identity or not info['State']['Running']:
+            break
+        identity = management_identity(directory)
+        remaining = deadline - time.monotonic()
+        if identity is not None or remaining <= 0:
+            break
+        time.sleep(min(0.5, remaining))
+    if not info['State']['Running'] or (export_identity and identity is None):
         log=subprocess.run(['docker','logs','--tail','50',name],capture_output=True,text=True,timeout=5)
         DIAGNOSTIC.write_text((log.stdout+log.stderr)[-16384:])
+    if export_identity and info['State']['Running'] and identity is None:
+        raise RemoteError('management_identity_not_ready')
     result={'directory':str(directory),'container':name,'running':info['State']['Running'],
             'ip':next((v['IPAddress'] for v in info['NetworkSettings'].get('Networks',{}).values() if v.get('IPAddress')),None)}
     if management_auth:
         result['management_auth'] = management_auth
-    if c.get('export_identity') and info['State']['Running']:
-        certificate=directory/'node-cert.pem';key=directory/'node-key.pem'
-        if certificate.is_file() and key.is_file() and certificate.stat().st_size<131072 and key.stat().st_size<131072:
-            result['management_tls']={'certificate':certificate.read_text(),'key':key.read_text()}
+    if identity is not None:
+        result['management_tls'] = identity
     return result
 
 
