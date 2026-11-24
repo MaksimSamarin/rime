@@ -1,6 +1,6 @@
 # Match the qualified node and panel sources.
 FROM gozargah/marzban-node@sha256:f93791ee35aa98b3851b74e5556c33a1d4607caf3e10781f52f37add14ed974d AS node-source
-ARG RIME_VERSION=0.9.1
+ARG RIME_VERSION=0.9.2
 ARG RIME_REVISION=development
 LABEL org.opencontainers.image.source="https://github.com/MaksimSamarin/rime" \
       org.opencontainers.image.version=$RIME_VERSION \
@@ -17,7 +17,7 @@ RUN python /opt/rime-node-build/apply.py /code
 
 FROM gozargah/marzban@sha256:8e422c21997e5d2e3fa231eeff73c0a19193c20fc02fa4958e9368abb9623b8d
 WORKDIR /code
-ARG RIME_VERSION=0.9.1
+ARG RIME_VERSION=0.9.2
 ARG RIME_REVISION=development
 LABEL org.opencontainers.image.source="https://github.com/MaksimSamarin/rime" \
       org.opencontainers.image.version=$RIME_VERSION \

@@ -184,6 +184,7 @@ class Provisioner:
             except (ValueError,TypeError):code=None
             messages={'image_unavailable':'Docker не нашёл проверенный образ после загрузки. Требуется проверка сборки на панели',
                       'port_conflict':'Порт ноды уже занят другой службой. Выберите свободный порт и повторите проверку',
+                      'management_identity_not_ready':'Контейнер не подготовил TLS-сертификат управления Xray за 30 секунд. Журнал сохранён в install-error.log на сервере',
                       'container_start_failed':'Контейнер ноды не запустился. Подробности сохранены в install-error.log на сервере'}
             raise ProvisionError(messages.get(code,'Проверка или установка на сервере не выполнена. Диагностика сохранена в каталоге этой попытки на сервере'))
         return json.loads(raw)
