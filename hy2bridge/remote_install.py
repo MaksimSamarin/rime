@@ -276,8 +276,12 @@ def main(c):
             policy=directory/'control-policy'
             if policy.is_symlink() or not policy.is_dir():raise RuntimeError('Management policy directory is unavailable')
             args+=['--mount',f'type=bind,src={policy},dst=/control-policy']
-        for filename in ['meminfo','stat','uptime','loadavg']:
+        for filename in ['meminfo','stat','uptime','loadavg','cpuinfo']:
             args+=['--mount',f'type=bind,src=/proc/{filename},dst=/proc/{filename},readonly']
+        # The node's own cgroup counters: inside LXC, Docker's /proc/stat describes the whole host.
+        for filename in ['cpu.stat','cpu.max']:
+            if Path('/sys/fs/cgroup/'+filename).is_file():
+                args+=['--mount',f'type=bind,src=/sys/fs/cgroup/{filename},dst=/host-cgroup/{filename},readonly']
         args+=['--entrypoint','python',image,'/observer/observer.py','--config','/observer/config.json']
         run(args)
         return {'running':json.loads(run(['docker','inspect',observer]))[0]['State']['Running'],'already_configured':False}

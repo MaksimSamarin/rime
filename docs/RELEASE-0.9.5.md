@@ -23,6 +23,11 @@ subscription switch in the node card a visible button.
   blocked direct address no longer keeps a permanent `client_unreachable`
   incident; the direct result stays visible in the node card. A failing path
   through the entry still degrades the node.
+- **Node metrics in LXC containers.** The observer installer also binds
+  `/proc/cpuinfo` and the host's cgroup CPU counters. CPU usage comes from the
+  node's cgroup, so a node in an LXC container no longer shows the provider's
+  host CPU or the system time some lxcfs builds report. Existing observers keep
+  their mounts until they are installed again.
 
 ## Console
 

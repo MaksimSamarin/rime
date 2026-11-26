@@ -48,6 +48,37 @@ class Resources:
         except Exception:
             return {'online_users':None,'online_connections':None,'connection_metric_state':'unavailable'}
 
+    def cgroup_cpus(self, directory):
+        """CPUs available to the node: its cgroup quota, otherwise the processors it is shown."""
+        try:
+            quota,period=(directory/'cpu.max').read_text().split()[:2]
+            if quota!='max' and int(period)>0:return max(int(quota)/int(period),0.01)
+        except (OSError,ValueError):pass
+        try:
+            count=sum(line.startswith('processor') for line in (self.proc/'cpuinfo').read_text().splitlines())
+            if count:return count
+        except OSError:pass
+        return os.cpu_count() or 1
+
+    def cgroup_cpu(self):
+        """CPU use of the node's own cgroup when the installer mounted its counters.
+
+        Inside an LXC container, /proc/stat seen by Docker is the whole host, and some
+        lxcfs builds report system time the container never used. The cgroup counter
+        belongs to the node itself, so it is preferred when present.
+        """
+        directory=Path(self.config.get('cgroup_dir','/host-cgroup'))
+        try:
+            usage=next(int(line.split()[1]) for line in (directory/'cpu.stat').read_text().splitlines() if line.startswith('usage_usec '))
+        except (OSError,StopIteration,ValueError,IndexError):
+            return False,None
+        now=time.monotonic();cpu=None
+        previous=getattr(self,'previous_cgroup',None)
+        if previous and now>previous[1]:
+            cpu=max(0,min(100,round(100*(usage-previous[0])/((now-previous[1])*1e6*self.cgroup_cpus(directory)),2)))
+        self.previous_cgroup=(usage,now)
+        return True,cpu
+
     def sample(self):
         values=[int(x) for x in (self.proc/'stat').read_text().splitlines()[0].split()[1:]]
         total=sum(values[:8]);idle=values[3]+values[4];cpu=None
@@ -55,6 +86,8 @@ class Resources:
             delta=total-self.previous[0]
             if delta>0:cpu=max(0,min(100,round(100*(1-(idle-self.previous[1])/delta),2)))
         self.previous=(total,idle)
+        available,cgroup=self.cgroup_cpu()
+        if available:cpu=cgroup
         memory={line.split(':')[0]:int(line.split()[1])*1024 for line in (self.proc/'meminfo').read_text().splitlines()}
         fs=os.statvfs(self.config.get('disk_path','/'))
         port=int(self.config['vpn_port']);protocol=self.config['protocol']
