@@ -41,6 +41,10 @@ class UpdateRequest(BaseModel):
     version: str = Field(pattern=r'^\d+\.\d+\.\d+(?:-rc\.?\d+)?$')
 
 
+class RollbackRequest(BaseModel):
+    confirmation: str
+
+
 class DowngradeRequest(BaseModel):
     version: str = Field(pattern=r'^\d+\.\d+\.\d+(?:-rc\.?\d+)?$')
     confirmation: str
@@ -82,3 +86,13 @@ def check(response: Response, admin=Depends(Admin.check_sudo_admin)):
 @router.post('')
 def update(payload: UpdateRequest, response: Response, admin=Depends(Admin.check_sudo_admin)):
     return invoke(response, service.enqueue, payload.version)
+
+
+@router.post('/cancel')
+def cancel(response: Response, admin=Depends(Admin.check_sudo_admin)):
+    return invoke(response, service.cancel)
+
+
+@router.post('/rollback')
+def rollback(payload: RollbackRequest, response: Response, admin=Depends(Admin.check_sudo_admin)):
+    return invoke(response, service.enqueue_rollback, payload.confirmation)

@@ -112,6 +112,28 @@ sudo systemctl status rime-update.path rime-update.service
 sudo journalctl -u rime-update.service --since today
 ```
 
+## Stopping an update
+
+**Stop update** appears in the dialog while the release is queued, checked or
+downloading. The panel places a stop request for that job in the update queue.
+The worker reads it between download blocks, during retry pauses and once more
+before the backup. It then ends the job with `update_cancelled` and removes the
+partial archive and any image it already loaded. The panel container is not
+touched. Once the backup has started, an update cannot be stopped; a failed
+readiness check then restores the previous container automatically.
+
+## Rolling back from the dialog
+
+After every successful job the worker checks whether it would accept a rollback
+of that job right now. If so, it publishes an offer for the version that job
+replaced. The dialog then shows **Roll back to X** with an explicit
+confirmation. The rollback runs through the same checks as the CLI below. It
+keeps the current database and data files, requires the same migration
+revision and restores the current version if the readiness check fails. After a
+rollback the offer points back to the version it replaced. An update or
+rollback published by an older worker carries no offer until the next job
+finishes. Reinstall the host worker from 0.9.5 or later to get these controls.
+
 ## Explicit rollback after success
 
 The host CLI can install the image preceding a selected successful job. It keeps

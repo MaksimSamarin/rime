@@ -97,6 +97,29 @@ class ResourceObserverTests(unittest.TestCase):
                 (p/'123/stat').write_text('123 (xray) Z 0 0\n')
                 self.assertFalse(sampler.sample()['service_healthy'])
 
+    def test_cpu_comes_from_the_node_cgroup_when_mounted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p=Path(tmp);(p/'net').mkdir();cg=p/'cgroup';cg.mkdir()
+            # lxcfs-style /proc/stat claiming a busy CPU must not win over the cgroup counter.
+            (p/'stat').write_text('cpu 100 0 0 900 0 0 0 0 0 0\n')
+            (p/'meminfo').write_text('MemTotal: 1000 kB\nMemAvailable: 400 kB\n')
+            (p/'uptime').write_text('100.5 0\n')
+            (p/'cpuinfo').write_text('processor\t: 0\nprocessor\t: 1\n')
+            (cg/'cpu.stat').write_text('usage_usec 1000000\nuser_usec 600000\nsystem_usec 400000\n')
+            (cg/'cpu.max').write_text('50000 100000\n')
+            sampler=Resources({'protocol':'xray','vpn_port':443,'process_names':['xray'],'cgroup_dir':str(cg)},tmp)
+            clock=iter([100.0,110.0,120.0])
+            with patch('hy2bridge.observer.os.statvfs',return_value=SimpleNamespace(f_blocks=100,f_bavail=30,f_frsize=1024),create=True), \
+                 patch('hy2bridge.observer.os.getloadavg',return_value=(.5,.2,.1),create=True), \
+                 patch('hy2bridge.observer.time.monotonic',side_effect=lambda:next(clock)):
+                self.assertIsNone(sampler.sample()['cpu_percent'])
+                (p/'stat').write_text('cpu 110 0 800 990 0 0 0 0 0 0\n')
+                (cg/'cpu.stat').write_text('usage_usec 3500000\n')
+                self.assertEqual(sampler.sample()['cpu_percent'],50)
+                (cg/'cpu.max').write_text('max 100000\n')
+                (cg/'cpu.stat').write_text('usage_usec 8500000\n')
+                self.assertEqual(sampler.sample()['cpu_percent'],25)
+
     def test_sender_refuses_unverified_or_credential_bearing_endpoints(self):
         for url in ['http://remote.invalid/api/fleet/telemetry/a','https://user:pass@remote.invalid/api/fleet/telemetry/a','https://remote.invalid/api/users']:
             with self.assertRaises(ValueError):Sender({'url':url,'token':'a'*40})

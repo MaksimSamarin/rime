@@ -22,16 +22,33 @@ SERVERS = [('eu-west', 'Amsterdam', 'xray'), ('eu-north', 'Helsinki', 'hysteria2
 
 
 def update_demo(server, now):
+    """Synthetic update job: two seconds per phase, with stop and rollback paths."""
     started = getattr(server, 'update_started', None)
-    phases = ['checking', 'downloading', 'backup', 'installing', 'verifying', 'succeeded']
-    phase = phases[min(5, int((now - started) / 2))] if started else None
+    rollback = getattr(server, 'rollback_started', None)
+    cancelled = getattr(server, 'update_cancelled', None)
     latest = {'id': 'synthetic-release', 'tag': 'v0.9.1', 'version': '0.9.1', 'published_at': '2026-11-14T10:00:00Z',
               'notes': 'Более быстрые отчёты по трафику.\nПроверка VPN по текущему DNS.\nУлучшенная навигация на телефоне.'}
-    job = {'id': 'synthetic-update', 'version': '0.9.1', 'phase': phase, 'progress': 64} if phase else {}
-    return {'demo':True,'current_version': '0.9.1' if phase == 'succeeded' else '0.9.0', 'enabled': True,
-            'checked_at': now if getattr(server, 'update_checked', False) else None,
-            'latest': latest if getattr(server, 'update_checked', False) else None,
-            'available': getattr(server, 'update_checked', False) and phase != 'succeeded', 'job': job}
+    current, job, offer = '0.9.0', {}, None
+    if rollback:
+        phases = ['backup', 'installing', 'verifying', 'succeeded']
+        phase = phases[min(3, int((now - rollback) / 2))]
+        job = {'id': 'synthetic-rollback', 'version': '0.9.0', 'phase': phase, 'operation': 'rollback'}
+        current = '0.9.0' if phase == 'succeeded' else '0.9.1'
+        offer = {'version': '0.9.1'} if phase == 'succeeded' else None
+    elif cancelled:
+        job = {'id': 'synthetic-update', 'version': '0.9.1', 'phase': 'failed', 'error': 'update_cancelled'}
+    elif started:
+        phases = ['checking', 'downloading', 'downloading', 'backup', 'installing', 'verifying', 'succeeded']
+        phase = phases[min(6, int((now - started) / 2))]
+        job = {'id': 'synthetic-update', 'version': '0.9.1', 'phase': phase, 'progress': 64, 'retries': 1}
+        current = '0.9.1' if phase == 'succeeded' else '0.9.0'
+        offer = {'version': '0.9.0'} if phase == 'succeeded' else None
+    checked = getattr(server, 'update_checked', False)
+    return {'demo': True, 'current_version': current, 'enabled': True,
+            'checked_at': now if checked else None, 'latest': latest if checked else None,
+            'available': checked and current == '0.9.0' and not rollback, 'job': job,
+            'cancellable': job.get('phase') in ('queued', 'checking', 'downloading'), 'cancel_requested': False,
+            'rollback': offer}
 
 
 def users(now):
@@ -268,7 +285,14 @@ class Handler(BaseHTTPRequestHandler):
             self.server.update_checked=True
             return self.send(update_demo(self.server,time.time()))
         if self.path=='/api/system/updates':
-            self.server.update_started=time.time()
+            self.server.update_started=time.time();self.server.update_cancelled=None;self.server.rollback_started=None
+            return self.send(update_demo(self.server,time.time()))
+        if self.path=='/api/system/updates/cancel':
+            self.server.update_cancelled=time.time()
+            return self.send(update_demo(self.server,time.time()))
+        if self.path=='/api/system/updates/rollback':
+            if data.get('confirmation')!='rollback':return self.send({'detail':'rollback_confirmation_required'},409)
+            self.server.rollback_started=time.time()
             return self.send(update_demo(self.server,time.time()))
         if self.path=='/api/fleet/provision/host-key':return self.send({'address':'203.0.113.20','fingerprint':'SHA256:'+'a'*43})
         if self.path.endswith('/delete/plan'):

@@ -27,5 +27,6 @@ class RemoteObserverTests(unittest.TestCase):
                 self.assertEqual(len(created),1)
                 self.assertIn('container:fleet-'+job,created[0])
                 self.assertTrue(any('/proc/meminfo' in arg for arg in created[0]))
+                self.assertTrue(any('/proc/cpuinfo' in arg for arg in created[0]))
                 with self.assertRaises(RuntimeError):remote_install.main({**config,'files':{**files,'config.json':'{"different":true}'}})
             self.assertEqual(len(created),1)

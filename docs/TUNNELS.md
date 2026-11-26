@@ -80,6 +80,14 @@ The selected-path probe checks actual VPN and proxy payload through the entry.
 Direct availability from the panel remains a separate observation. A running
 service or resource heartbeat alone does not establish client availability.
 
+While a route is active, clients receive the entry address, so the node's
+state and monitoring history follow the selected-path probe, which runs every
+minute. A failed or blocked direct address does not raise
+`client_unreachable` for such a node and resolves an open one. The direct
+result stays visible in the node card. A failed path through the entry
+degrades the node and opens `relay_client_unreachable`. After the route is
+removed, direct probes raise incidents again.
+
 Entry transport counters are separate from VPN user balances. They include
 protocol overhead and show what passed through each forwarding service. User
 limits continue to be charged once by the exit. Management and SSH forwarding

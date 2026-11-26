@@ -58,3 +58,37 @@ class ReachabilityTests(unittest.TestCase):
         with self.store.connection(write=True) as db:db.execute('DELETE FROM fleet_inventory WHERE id=?',('n1',))
         ops.ensure_node('n1',address='198.51.100.1')
         self.assertEqual(ops.nodes()[0]['client_access']['state'],'unknown')
+
+    def tunnel(self, node='n1', state='active'):
+        with self.store.connection(write=True) as db:
+            db.execute('CREATE TABLE IF NOT EXISTS fleet_tunnels(id TEXT PRIMARY KEY,node TEXT,state TEXT)')
+            db.execute('INSERT OR REPLACE INTO fleet_tunnels(id,node,state) VALUES(?,?,?)', ('t-' + node, node, state))
+
+    def test_direct_probe_of_tunnelled_node_does_not_keep_an_incident(self):
+        ops,p=self.configure();ops.heartbeat('n1',{'service_healthy':True})
+        p.ingest('home','n1',self.sample(False,'connect'))
+        self.assertIsNone(ops.events()[0]['resolved_at'])
+        self.tunnel()
+        for _ in range(3):p.ingest('home','n1',self.sample(False,'connect'))
+        events=[e for e in ops.events() if e['code']=='client_unreachable']
+        self.assertEqual(len(events),1)
+        self.assertIsNotNone(events[0]['resolved_at'])
+        self.assertEqual(events[0]['occurrences'],1)
+
+    def test_deleted_route_returns_direct_probe_incidents(self):
+        ops,p=self.configure();ops.heartbeat('n1',{'service_healthy':True});self.tunnel(state='deleted')
+        p.ingest('home','n1',self.sample(False,'connect'))
+        self.assertIsNone(next(e for e in ops.events() if e['code']=='client_unreachable')['resolved_at'])
+
+    def test_state_of_tunnelled_node_follows_the_route_check(self):
+        ops,p=self.configure();ops.heartbeat('n1',{'service_healthy':True})
+        class Relays:
+            result={'active':True,'fresh':True,'vpn_passed':True}
+            def summary(self,db,node):return dict(self.result)
+        ops.relays=Relays()
+        p.ingest('home','n1',self.sample(False,'connect'))
+        self.assertEqual(ops.nodes()[0]['state'],'healthy')
+        Relays.result={'active':True,'fresh':True,'vpn_passed':False}
+        p.ingest('home','n1',self.sample())
+        self.assertEqual(ops.nodes()[0]['state'],'degraded')
+

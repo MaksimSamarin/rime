@@ -11,7 +11,9 @@ import uuid
 from update_runtime.releases import ReleaseCatalog, UpdateError, version_key
 
 ACTIVE_PHASES = {'queued', 'checking', 'downloading', 'backup', 'installing', 'verifying', 'rollback'}
-JOB_FIELDS = {'id', 'version', 'phase', 'error', 'started_at', 'updated_at', 'completed_at', 'progress', 'retries'}
+JOB_FIELDS = {'id', 'version', 'phase', 'error', 'started_at', 'updated_at', 'completed_at', 'progress', 'retries', 'operation'}
+# The worker honours a cancel request only before the backup and container swap begin.
+CANCELLABLE_PHASES = {'queued', 'checking', 'downloading'}
 
 
 class Updates:
@@ -40,12 +42,27 @@ class Updates:
         if job.get('phase') == 'queued' and time.time() - job.get('updated_at', 0) > 60:
             job.update(phase='failed', error='agent_unavailable')
         latest = self.latest
+        offer = self.rollback_offer()
         return {
             'current_version': self.current_version, 'enabled': self.supported and agent.get('protocol') == 1,
             'checked_at': self.checked_at, 'latest': latest,
             'available': bool(latest and version_key(latest['version']) > version_key(self.current_version)),
             'job': job,
+            'cancellable': job.get('phase') in CANCELLABLE_PHASES and self.read('cancel.json').get('id') != job.get('id'),
+            'cancel_requested': bool(job.get('id')) and self.read('cancel.json').get('id') == job.get('id'),
+            'rollback': {'version': offer['version']} if offer else None,
         }
+
+    def rollback_offer(self):
+        """The worker publishes the image the last successful job replaced; it applies only to this version."""
+        offer = self.read('rollback.json')
+        try:
+            version_key(offer.get('version', ''))
+        except (ValueError, TypeError, UpdateError):
+            return None
+        if offer.get('from') != self.current_version or not isinstance(offer.get('parent'), str) or len(offer['parent']) != 32:
+            return None
+        return offer
 
     def check(self):
         if self.checked_at is None or time.time() - self.checked_at > 15:
@@ -82,6 +99,36 @@ class Updates:
                     raise UpdateError('node_operation_running')
             if 'fleet_node_transfers' in tables and database.execute("SELECT 1 FROM fleet_node_transfers WHERE state='switched' LIMIT 1").fetchone():
                 raise UpdateError('node_operation_running')
+
+    def cancel(self):
+        with self.lock():
+            status = self.status()
+            job = status['job']
+            if job.get('phase') not in CANCELLABLE_PHASES:
+                raise UpdateError('update_not_cancellable')
+            self.write('cancel.json', {'id': job['id'], 'requested_at': time.time()})
+        return self.status()
+
+    def enqueue_rollback(self, confirmation):
+        if confirmation != 'rollback':
+            raise UpdateError('rollback_confirmation_required')
+        if not self.supported:raise UpdateError('unsupported_database')
+        with self.lock():
+            status = self.status()
+            if not status['enabled']:
+                raise UpdateError('agent_unavailable')
+            if status['job'].get('phase') in ACTIVE_PHASES:
+                raise UpdateError('update_running')
+            offer = self.rollback_offer()
+            if not offer:
+                raise UpdateError('rollback_not_available')
+            self.ensure_idle()
+            job = {'id': uuid.uuid4().hex, 'version': offer['version'], 'phase': 'queued', 'operation': 'rollback',
+                   'updated_at': time.time()}
+            self.write('status.json', job)
+            self.write('request.json', {'id': job['id'], 'operation': 'rollback', 'parent': offer['parent'],
+                                        'tag': 'v' + offer['version'], 'requested_at': time.time()})
+        return self.status()
 
     def enqueue(self, version):
         if not self.supported:raise UpdateError('unsupported_database')

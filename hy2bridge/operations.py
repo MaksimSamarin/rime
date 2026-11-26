@@ -237,7 +237,9 @@ class Operations:
                 if getattr(self,'relays',None):item['tunnel_access']=self.relays.summary(db,item['id'])
                 tunnel=item.get('tunnel_access') or {}
                 selected_available=tunnel.get('active') and tunnel.get('fresh') and tunnel.get('vpn_passed',tunnel.get('passed')) is True
-                if item['client_access']['state']=='unavailable' and item['state']=='healthy' and not selected_available:item['state']='degraded'
+                # Behind an entry server the route check through the entry is what clients get.
+                selected_failed=tunnel.get('active') and tunnel.get('fresh') and tunnel.get('vpn_passed',tunnel.get('passed')) is False
+                if item['state']=='healthy' and (selected_failed or (item['client_access']['state']=='unavailable' and not selected_available)):item['state']='degraded'
             return result
 
     def expire_checks(self,now=None):

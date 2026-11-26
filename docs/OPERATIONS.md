@@ -268,6 +268,16 @@ proxy software until separately removed.
 
 ## Availability and retention
 
+Native node observers run in Docker next to the node container. The installer
+binds the node host's `/proc/meminfo`, `stat`, `uptime`, `loadavg` and
+`cpuinfo`, and on cgroup v2 hosts also `cpu.stat` and `cpu.max` of the host's
+cgroup root. Inside an LXC container these files describe the container, not
+the physical host. CPU usage is taken from the cgroup counter when it is
+present, because some lxcfs builds report system time in `/proc/stat` that the
+container did not use. Load average is the provider's value unless lxcfs
+virtualizes it. Observers installed before 0.9.5 keep their original mounts
+until they are installed again.
+
 The console's **Документация** tab contains administrator guides, troubleshooting
 and FAQ within the shared navigation. It is static and pauses background API
 polling while being read.
