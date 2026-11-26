@@ -353,7 +353,9 @@ class WorkerDownloadTests(unittest.TestCase):
                          'size': len(self.data), 'sha256': hashlib.sha256(self.data).hexdigest()}
         self.path = root / 'image.tar.gz'
         self.config = {'data_directory': str(root / 'data'), 'state_directory': str(root / 'private'),
-                       'database': str(root / 'data' / 'db.sqlite3'), 'download_retry_delay': 0, 'download_retries': 2}
+                       'database': str(root / 'data' / 'db.sqlite3'), 'download_retry_delay': 0, 'download_retries': 2,
+                       # Queue files are chowned to the panel user; CI runs unprivileged.
+                       'panel_uid': os.getuid(), 'panel_gid': os.getgid()}
         self.statuses = []
 
     def worker(self, answers):
