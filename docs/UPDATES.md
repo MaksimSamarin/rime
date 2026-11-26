@@ -30,6 +30,11 @@ file queue under its data directory. The Docker socket stays on the host. Compos
 ID; the installer resolves the canonical name before saving it. A 64-hex name
 is rejected. The installed configuration supports consecutive updates.
 
+The host worker is not replaced by panel updates. To pick up worker changes, such
+as the resumable download added in 0.9.4, run the installer again from the new
+source with the same container name. It keeps the previous `config.json` and unit
+files next to the new ones as `*.before`.
+
 Installations that bind source code over `/code` need an image-based deployment
 before the UI updater can replace their code. SQLite and a single panel process
 are required. Linux amd64 is the qualified release platform.
@@ -49,6 +54,15 @@ credentials are carried forward. A failed readiness check restores the prior
 container and saved data. Private-file ownership and symbolic links are restored
 without writing through external link targets. The dialog can be closed and
 reopened during the job.
+
+Slow routes to GitHub may close a long download before the end. The worker then
+requests the remaining bytes with an HTTP Range request and keeps hashing in file
+order. A server that ignores the range restarts the file from the first byte. The
+complete archive must still match the size and SHA-256 from the signed manifest.
+If an attempt and the eight retries after it bring no new bytes, the update stops
+with `release_unavailable`. The private host settings `download_retries` and
+`download_retry_delay` change these limits. The dialog shows how many times the
+download was resumed.
 
 Free space is checked before downloading, loading new image layers and backing
 up data. Existing base layers are reused. Insufficient space stops the update

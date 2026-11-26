@@ -15,7 +15,7 @@ from config import ALLOWED_ORIGINS, DOCS, XRAY_SUBSCRIPTION_PATH, SQLALCHEMY_DAT
 
 update_directory = str(resolve_update_directory(SQLALCHEMY_DATABASE_URL, os.environ))
 
-__version__ = "0.9.3"
+__version__ = "0.9.4"
 __upstream_version__ = "0.8.4"
 
 app = FastAPI(

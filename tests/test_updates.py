@@ -2,10 +2,12 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import socket
 import sqlite3
 import tempfile
 import time
 import unittest
+import urllib.request
 from unittest.mock import patch
 
 from hy2bridge.updates import Updates
@@ -235,6 +237,129 @@ class WorkerBackupTests(unittest.TestCase):
             with tarfile.open(worker.folder / 'data.tar.gz') as archive:
                 self.assertNotIn('data/.updates/request.json', archive.getnames())
                 self.assertIn('data/identity.key', archive.getnames())
+
+
+class Response:
+    """Scripted download response: serves `body` from `start`, then ends early or raises."""
+    def __init__(self, body, status=200, content_range=None, stop_after=None, error=None):
+        self.body, self.status, self.position = body, status, 0
+        self.headers = {'Content-Range': content_range} if content_range else {}
+        self.stop_after, self.error = stop_after, error
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def getcode(self):
+        return self.status
+
+    def read(self, amount):
+        limit = len(self.body) if self.stop_after is None else self.stop_after
+        if self.position >= limit:
+            if self.error is not None:
+                raise self.error
+            return b''
+        block = self.body[self.position:min(self.position + amount, limit)]
+        self.position += len(block)
+        return block
+
+
+class DownloadCatalog:
+    def __init__(self, answers):
+        self.answers, self.ranges = list(answers), []
+
+    def open(self, url, headers=None):
+        self.ranges.append((headers or {}).get('Range'))
+        answer = self.answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+
+class WorkerDownloadTests(unittest.TestCase):
+    def setUp(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        root = Path(folder.name)
+        (root / 'data').mkdir()
+        self.data = os.urandom(3 * 1024 * 1024 + 123)
+        self.artifact = {'url': 'https://github.com/MaksimSamarin/rime/releases/download/v0.3.1/rime-linux-amd64.tar.gz',
+                         'size': len(self.data), 'sha256': hashlib.sha256(self.data).hexdigest()}
+        self.path = root / 'image.tar.gz'
+        self.config = {'data_directory': str(root / 'data'), 'state_directory': str(root / 'private'),
+                       'database': str(root / 'data' / 'db.sqlite3'), 'download_retry_delay': 0, 'download_retries': 2}
+        self.statuses = []
+
+    def worker(self, answers):
+        catalog = DownloadCatalog(answers)
+        worker = Worker(self.config, docker=object(), catalog=catalog)
+        worker.status = lambda phase, **fields: self.statuses.append((phase, fields))
+        return worker, catalog
+
+    def rest(self, start, **extra):
+        return Response(self.data[start:], 206, 'bytes %d-%d/%d' % (start, len(self.data) - 1, len(self.data)), **extra)
+
+    def test_dropped_download_resumes_from_the_received_bytes(self):
+        cut = 1024 * 1024 + 7
+        worker, catalog = self.worker([Response(self.data, stop_after=cut), self.rest(cut)])
+        worker.fetch(self.artifact, self.path)
+        self.assertEqual(self.path.read_bytes(), self.data)
+        self.assertEqual(catalog.ranges, [None, 'bytes=%d-' % cut])
+        self.assertEqual(self.statuses[-1], ('downloading', {'progress': 100, 'retries': 1}))
+
+    def test_read_timeout_and_reset_are_resumed(self):
+        first, second = 1024 * 1024, 2 * 1024 * 1024
+        worker, catalog = self.worker([
+            Response(self.data, stop_after=first, error=socket.timeout('timed out')),
+            self.rest(first, stop_after=second - first, error=ConnectionResetError()),
+            UpdateError('release_unavailable'),
+            self.rest(second),
+        ])
+        worker.fetch(self.artifact, self.path)
+        self.assertEqual(self.path.read_bytes(), self.data)
+        self.assertEqual(catalog.ranges, [None, 'bytes=%d-' % first, 'bytes=%d-' % second, 'bytes=%d-' % second])
+
+    def test_server_that_ignores_range_restarts_from_the_first_byte(self):
+        worker, catalog = self.worker([Response(self.data, stop_after=500000), Response(self.data)])
+        worker.fetch(self.artifact, self.path)
+        self.assertEqual(self.path.read_bytes(), self.data)
+
+    def test_range_for_another_offset_is_not_appended(self):
+        cut = 1024 * 1024
+        worker, _ = self.worker([Response(self.data, stop_after=cut), self.rest(cut + 10), self.rest(cut)])
+        worker.fetch(self.artifact, self.path)
+        self.assertEqual(self.path.read_bytes(), self.data)
+
+    def test_resumed_bytes_are_still_checked_against_the_release_digest(self):
+        cut = 1024 * 1024
+        forged = Response(b'x' * (len(self.data) - cut), 206, 'bytes %d-%d/%d' % (cut, len(self.data) - 1, len(self.data)))
+        worker, _ = self.worker([Response(self.data, stop_after=cut), forged])
+        with self.assertRaises(UpdateError) as context:
+            worker.fetch(self.artifact, self.path)
+        self.assertEqual(context.exception.code, 'release_checksum_mismatch')
+
+    def test_download_without_progress_stops_after_the_retry_limit(self):
+        worker, catalog = self.worker([UpdateError('release_unavailable')] * 3)
+        with self.assertRaises(UpdateError) as context:
+            worker.fetch(self.artifact, self.path)
+        self.assertEqual(context.exception.code, 'release_unavailable')
+        self.assertEqual(len(catalog.ranges), 3)
+
+    def test_oversized_answer_is_rejected(self):
+        worker, _ = self.worker([Response(self.data + b'extra')])
+        with self.assertRaises(UpdateError) as context:
+            worker.fetch(self.artifact, self.path)
+        self.assertEqual(context.exception.code, 'release_checksum_mismatch')
+
+    def test_range_header_survives_the_github_redirect(self):
+        catalog = ReleaseCatalog()
+        handler = next(item for item in catalog.opener.handlers if type(item).__name__ == 'SafeRedirect')
+        request = urllib.request.Request(self.artifact['url'], headers={'Range': 'bytes=10-'})
+        target = 'https://release-assets.githubusercontent.com/github-production-release-asset/1/2?sig=x'
+        redirected = handler.redirect_request(request, None, 302, 'Found', {}, target)
+        self.assertEqual(redirected.get_header('Range'), 'bytes=10-')
 
 
 if __name__ == '__main__':

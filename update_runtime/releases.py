@@ -74,11 +74,12 @@ class ReleaseCatalog:
         if parsed.scheme != 'https' or parsed.hostname not in allowed or parsed.port not in (None, 443):
             raise UpdateError('invalid_release_source')
 
-    def open(self, url):
+    def open(self, url, headers=None):
         self.validate_url(url)
         request = urllib.request.Request(url, headers={
             'Accept': 'application/vnd.github+json',
             'User-Agent': 'Rime-Updater',
+            **(headers or {}),
         })
         try:
             return self.opener.open(request, timeout=15)
