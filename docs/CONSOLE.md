@@ -22,6 +22,15 @@ Hy2 policy and managed Hy2 links respect the selection. Xray applies it during l
 
 Native subscription formats share the host filter. Managed VLESS hosts are associated by their recorded native node ID. Exact, unique matches of legacy node addresses and local `{SERVER_IP}` / `{SERVER_IPV6}` hosts are associated automatically. For aliases or ambiguous hosts, select the corresponding subscription addresses in the node settings. Unmapped hosts are omitted for restricted users. **All nodes** preserves the existing host list. Credentials and signing keys are not reissued; previously issued subscription URLs remain valid.
 
+**Node in subscriptions** in the node card withholds every address of that node
+from all subscriptions, including users with **All nodes**, and can return it.
+VLESS hosts and Hy2 links are filtered on each subscription request, so the change
+needs no restart or node reconnect. Access on the node itself is unchanged:
+clients that already saved its configuration keep working until they refresh the
+subscription. The node list marks hidden nodes. The **Addresses of this node** list
+shows only addresses bound to this node or still unbound, with port, inbound and
+whether the address itself is disabled in subscriptions.
+
 Tags are groups for search and reporting, not authorization roles. A tag report uses current group membership and retained traffic belonging to the same user identity. Changing a tag changes the group report, not recorded counters.
 
 ## Incident workflow

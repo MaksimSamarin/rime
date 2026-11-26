@@ -1,5 +1,6 @@
 """Per-user metadata and node authorization; absent metadata preserves all-node access."""
 import json
+import time
 from copy import deepcopy
 
 current = None
@@ -15,6 +16,8 @@ class Access:
             db.execute('''CREATE TABLE IF NOT EXISTS fleet_host_nodes(
                 host_id INTEGER PRIMARY KEY, node TEXT NOT NULL)''')
             db.execute('CREATE TABLE IF NOT EXISTS fleet_node_labels(node TEXT PRIMARY KEY,name TEXT NOT NULL)')
+            # Nodes withheld from every subscription. Access on the node itself is unchanged.
+            db.execute('CREATE TABLE IF NOT EXISTS fleet_subscription_hidden(node TEXT PRIMARY KEY,hidden_at REAL NOT NULL)')
             if db.execute("SELECT 1 FROM sqlite_master WHERE name='hosts'").fetchone() and db.execute("SELECT 1 FROM sqlite_master WHERE name='nodes'").fetchone():
                 native=list(db.execute('SELECT id,address FROM nodes'))
                 for host in db.execute('SELECT id,address FROM hosts'):
@@ -54,16 +57,33 @@ class Access:
         selected=self.metadata(uid,db)['nodes']
         return selected is None or node in selected
 
+    @staticmethod
+    def host_node(db, host_id):
+        host=db.execute('SELECT node FROM fleet_host_nodes WHERE host_id=?',(host_id,)).fetchone()
+        if not host:
+            host=db.execute("SELECT 'xray:'||native_id AS node FROM fleet_managed WHERE host_id=? AND native_id IS NOT NULL",(host_id,)).fetchone()
+        return host['node'] if host else None
+
+    def hidden(self, db=None):
+        """Nodes withheld from every subscription."""
+        if db is None:
+            with self.store.connection() as conn:return self.hidden(conn)
+        return {r['node'] for r in db.execute('SELECT node FROM fleet_subscription_hidden')}
+
+    def set_subscription_visible(self, node, visible):
+        with self.store.connection(write=True) as db:
+            if visible:db.execute('DELETE FROM fleet_subscription_hidden WHERE node=?',(node,))
+            else:db.execute('INSERT OR IGNORE INTO fleet_subscription_hidden VALUES(?,?)',(node,time.time()))
+
     def host_allowed(self, username, host_id):
         with self.store.connection() as db:
             user=db.execute('SELECT id FROM users WHERE username=?',(username,)).fetchone()
             if not user:return False
+            node=self.host_node(db,host_id)
+            if node is not None and node in self.hidden(db):return False
             nodes=self.metadata(user['id'],db)['nodes']
             if nodes is None:return True
-            host=db.execute('SELECT node FROM fleet_host_nodes WHERE host_id=?',(host_id,)).fetchone()
-            if not host:
-                host=db.execute("SELECT 'xray:'||native_id AS node FROM fleet_managed WHERE host_id=?",(host_id,)).fetchone()
-            return bool(host and host['node'] in nodes)
+            return bool(node and node in nodes)
 
     def filtered_config(self, config, node):
         copy=deepcopy(config)

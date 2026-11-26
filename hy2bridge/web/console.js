@@ -146,7 +146,8 @@
   document.querySelectorAll('.dialog-close').forEach(b=>b.addEventListener('click',()=>b.closest('dialog').close()));
 
   function incidentState(event){return event.resolved_at?'Восстановлено':'Активно';}
-  const eventMessage=e=>e.code==='client_unreachable'?'Клиентская проба VPN-трафика не прошла':e.message;
+  // The server explains client probes of tunnelled nodes; keep its wording.
+  const eventMessage=e=>e.message||(e.code==='client_unreachable'?'Клиентская проба VPN-трафика не прошла':'Событие ноды');
   function events(){
     const values=state.events.filter(e=>!$('events-open').checked||!e.resolved_at);
     if(!values.length){$('events-table').replaceChildren(el('p',$('events-open').checked?'Активных проблем нет.':'Событий пока нет.','empty'));return;}
@@ -486,11 +487,32 @@
     }
     if(n.id!=='xray:local'){const enabled=add('node-enabled','Нода включена','', 'checkbox');enabled.checked=n.settings.active!==0&&n.enabled!==0;}
     if(n.monitoring_only){for(const input of fields.querySelectorAll('input'))if(input.id!=='node-name')input.disabled=true;$('node-save-status').textContent='Параметры действующего Hy2 сохраняются на сервере. Здесь можно изменить только подпись.';}
-    const labels={domain:'Домен / SNI',vpn_port:'VPN-порт',port:'Порт службы',api_port:'API-порт',usage_coefficient:'Коэффициент учёта',status:'Статус службы',active:'Добавлена в подписку'};
+    const labels={domain:'Домен / SNI',vpn_port:'VPN-порт',port:'Порт службы',api_port:'API-порт',usage_coefficient:'Коэффициент учёта',status:'Статус службы',active:'Опубликована при установке'};
     $('node-config').replaceChildren(...Object.entries({Адрес:n.address,Протокол:n.protocol,Версия:n.metrics.core_version||'Нет данных',...n.settings}).filter(([k])=>!['id','native_id','host_id'].includes(k)).flatMap(([k,v])=>[el('dt',labels[k]||k),el('dd',k==='active'?(v?'Да':'Нет'):v)]));
     const hostBox=$('node-hosts');hostBox.replaceChildren();
-    if(!isHub&&n.hosts.length){hostBox.append(el('h3','Адреса этой ноды в подписках'),el('p','Свяжите адреса подключения с этой выходной нодой. Они используются при выборе доступных пользователю нод.','small muted'));
-      for(const host of n.hosts){const label=el('label',null,'check'),input=el('input');input.type='checkbox';input.value=host.id;input.checked=host.node===n.id||host.id===n.settings.host_id;input.disabled=!!host.node&&host.node!==n.id;label.append(input,document.createTextNode(host.remark+' · '+host.address+(input.disabled?' (другая нода)':'')));hostBox.append(label);}
+    let subscription=$('node-subscription');
+    if(!subscription){subscription=el('div');subscription.id='node-subscription';hostBox.before(subscription);}
+    subscription.replaceChildren();
+    if(!isHub&&!n.monitoring_only){
+      const visible=n.subscription_visible!==false,status=el('p','','small muted');status.setAttribute('role','status');
+      subscription.append(el('h3','Нода в подписках'),el('p',visible?'Адреса этой ноды выдаются пользователям в подписках.':'Нода скрыта из всех подписок. Доступ на самой ноде не отключён: клиенты с уже сохранённой конфигурацией работают до обновления подписки.','small muted'));
+      const toggle=button(visible?'Убрать из всех подписок':'Вернуть в подписки',async()=>{
+        toggle.disabled=true;status.textContent='Применение…';
+        try{await api('/api/fleet/nodes/'+encodeURIComponent(n.id)+'/subscription',{method:'PUT',json:{visible:!visible}});await window.Rime.refresh();await nodeDetail();}
+        catch(error){status.textContent=error.message;toggle.disabled=false;}
+      });
+      if(visible)toggle.classList.add('danger');
+      subscription.append(toggle,status);
+    }
+    // Addresses already bound to another node belong to that node's card.
+    const ownHosts=n.hosts.filter(host=>!host.node||host.node===n.id);
+    if(!isHub&&ownHosts.length){hostBox.append(el('h3','Адреса этой ноды'),el('p','Отмеченные адреса принадлежат этой ноде. Они нужны пользователям с выбранными нодами: такие пользователи получают только адреса своих нод. Отключённый адрес не выдаётся никому.','small muted'));
+      for(const host of ownHosts){
+        const label=el('label',null,'check'),input=el('input');input.type='checkbox';input.value=host.id;input.checked=host.node===n.id||host.id===n.settings.host_id;
+        const protocol=String(host.inbound_tag||'').replace(/^VLESS_/,'VLESS ').replace(/_/g,' ');
+        const text=host.remark+' · '+host.address+(host.port?':'+host.port:'')+(protocol?' · '+protocol:'')+(host.is_disabled?' · отключён в подписках':'');
+        label.append(input,document.createTextNode(text));hostBox.append(label);
+      }
     }
     renderNodeEvents(n.id,n.events);
     const checks=$('node-checks');checks.replaceChildren(el('h3','Локальные проверки VPN на ноде'));

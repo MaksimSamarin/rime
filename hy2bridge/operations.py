@@ -229,7 +229,10 @@ class Operations:
                 for item in result:
                     item['meter']=self.meters.status(item['id'],db)
                     if item['meter'] and item['meter']['state']=='stale' and item['state']=='healthy':item['state']='degraded'
+            hidden={r[0] for r in db.execute('SELECT node FROM fleet_subscription_hidden')} \
+                if db.execute("SELECT 1 FROM sqlite_master WHERE name='fleet_subscription_hidden'").fetchone() else set()
             for item in result:
+                item['subscription_hidden']=item['id'] in hidden
                 item['client_access']=self.reachability.summary(db,item['id']) if self.reachability else {'state':'unknown','origin':None,'checked_at':None,'fresh':False}
                 if getattr(self,'relays',None):item['tunnel_access']=self.relays.summary(db,item['id'])
                 tunnel=item.get('tunnel_access') or {}
@@ -320,8 +323,11 @@ class Operations:
         for event in result:
             tunnel=by_id.get(event['node'],{}).get('tunnel_access') or {}
             if event['code']=='client_unreachable' and tunnel.get('active'):
-                event['message']='Прямая проба выходной ноды не прошла'
-                if tunnel.get('fresh') and tunnel.get('vpn_passed',tunnel.get('passed')):event['severity']='warning'
+                if tunnel.get('fresh') and tunnel.get('vpn_passed',tunnel.get('passed')):
+                    event['message']='Прямой адрес ноды недоступен. Клиенты подключаются через вход, маршрут работает'
+                    event['severity']='warning'
+                else:
+                    event['message']='Прямой адрес ноды недоступен, маршрут через вход тоже требует проверки'
         for node in observed:
             if node['state']=='offline' and not any(e['node']==node['id'] and not e['resolved_at'] and e['code']=='native_unavailable' for e in result):
                 result.insert(0,{'id':'offline:'+node['id']+':'+str(node.get('seen_at') or node.get('outage_since') or 0),'node':node['id'],'code':'heartbeat_stale',

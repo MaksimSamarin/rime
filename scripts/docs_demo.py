@@ -177,7 +177,15 @@ def console_nodes(server,now):
         if route:node['tunnel_access']={'active':True,'fresh':True,'passed':True,'vpn_passed':True,'proxies_passed':True,
             'entry_name':route['entry_name'],'domain':route['entry_domain'],'origin':route['origin'],'checked_at':now-12,
             'management':any(service['kind']=='management' for service in route['services'])}
+        node['subscription_hidden']=node['id'] in getattr(server,'hidden_nodes',set())
     return values
+
+
+def demo_hosts(node):
+    if node['protocol']!='xray' or node['id']=='xray:local':return []
+    domain=node['address']
+    return [{'id':101,'remark':node['name'],'address':domain,'port':443,'inbound_tag':'VLESS_REALITY','is_disabled':0,'node':node['id']},
+            {'id':102,'remark':node['name'],'address':domain,'port':2053,'inbound_tag':'VLESS_XHTTP','is_disabled':1,'node':node['id']}]
 
 
 def proxy_demo(server,node):
@@ -319,7 +327,16 @@ class Handler(BaseHTTPRequestHandler):
             return self.send({'id':identity})
         self.send({'detail':'Демо доступно только для просмотра'},405)
 
-    def do_PUT(self):self.send({'detail':'Демо доступно только для просмотра'},405)
+    def do_PUT(self):
+        parts=self.path.split('?',1)[0].removeprefix('/api/fleet/nodes/').split('/')
+        if self.path.startswith('/api/fleet/nodes/') and parts[1:]==['subscription']:
+            length=int(self.headers.get('Content-Length',0))
+            try:visible=bool(json.loads(self.rfile.read(min(length,4096))).get('visible'))
+            except ValueError:return self.send({'detail':'Invalid request'},422)
+            hidden=getattr(self.server,'hidden_nodes',set())
+            (hidden.discard if visible else hidden.add)(parts[0]);self.server.hidden_nodes=hidden
+            return self.send({'node':parts[0],'subscription_visible':visible})
+        self.send({'detail':'Демо доступно только для просмотра'},405)
     def do_DELETE(self):
         if self.path.startswith('/api/fleet/relays/routes/'):
             if not hasattr(self.server,'demo_jobs'):self.server.demo_jobs={}
@@ -380,7 +397,8 @@ class Handler(BaseHTTPRequestHandler):
                          'groups':[{'key':f'{i+1:012x}','family':'ipv4' if native else 'account','count':total//count+int(i<total%count)} for i in range(count)]}
                 return self.send({'node':node['id'],'name':node['name'],'protocol':node['protocol'],'received_at':now-4,'state':'available','count':total,'details':details})
             failed=node['id']=='eu-north'
-            node.update(settings={'domain':node['address'],'vpn_port':443,'port':62050,'api_port':62051,'usage_coefficient':1,'active':True},hosts=[],
+            node.update(settings={'domain':node['address'],'vpn_port':443,'port':62050,'api_port':62051,'usage_coefficient':1,'active':True},hosts=demo_hosts(node),
+                        subscription_visible=node['id'] not in getattr(self.server,'hidden_nodes',set()),
                         events=[e for e in events(now) if e['node']==node['id']],checks=[{'id':'demo','state':'failed' if failed else 'passed','completed_at':now-90,'result':{'stage':'payload','bytes':0 if failed else 2048,'latency_ms':None if failed else 42,'error':'Нет ответа контрольного клиента' if failed else None}}],
                         traffic=traffic(now,{'node':[node['id']]}))
             return self.send(node)
