@@ -42,6 +42,10 @@ class NodeEdit(BaseModel):
     origin_address: str | None = Field(default=None,min_length=1,max_length=253)
 
 
+class SubscriptionVisibility(BaseModel):
+    visible: bool
+
+
 class NodeQuotaEdit(BaseModel):
     limit_bytes: int = Field(ge=0,le=2**60)
     direction: Literal['outgoing','total'] = 'total'
@@ -214,7 +218,9 @@ def install(app,store,operations,access):
             if node.startswith('xray:') and node!='xray:local':
                 row=db.execute('SELECT port,api_port,usage_coefficient,status FROM nodes WHERE id=?',(int(node[5:]),)).fetchone()
                 if row:result['settings'].update(dict(row))
-            result['hosts']=[dict(r) for r in db.execute('''SELECT h.id,h.remark,h.address,
+            result['subscription_visible']=node not in access.hidden(db)
+            result['hosts']=[dict(r) for r in db.execute('''SELECT h.id,h.remark,h.address,h.port,h.inbound_tag,
+                COALESCE(h.is_disabled,0) AS is_disabled,
                 COALESCE(m.node,'xray:'||f.native_id) AS node FROM hosts h
                 LEFT JOIN fleet_host_nodes m ON m.host_id=h.id LEFT JOIN fleet_managed f ON f.host_id=h.id
                 ORDER BY h.id''')] if result['protocol']!='hysteria2' else []
@@ -301,6 +307,14 @@ def install(app,store,operations,access):
             finally:
                 if change:relays.edits.finish(change,accepted)
         return {'saved':True,'reconnect_scheduled':node.startswith('xray:') and node!='xray:local' and data.enabled is not False}
+
+    @app.put('/api/fleet/nodes/{node}/subscription',tags=['Fleet'])
+    def node_subscription(node:str,data:SubscriptionVisibility,admin:Admin=Depends(Admin.check_sudo_admin)):
+        """Show or withhold every subscription address of a node without reconnecting it."""
+        node_by_id(node)
+        if node=='xray:local':raise HTTPException(422,'Адреса хаба настраиваются в его VPN-привязках')
+        access.set_subscription_visible(node,data.visible)
+        return {'node':node,'subscription_visible':data.visible}
 
     @app.post('/api/fleet/nodes/{node}/checks',tags=['Fleet'])
     def node_check(node:str,admin:Admin=Depends(Admin.check_sudo_admin)):

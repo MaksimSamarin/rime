@@ -55,6 +55,40 @@ class AccessTests(unittest.TestCase):
         self.assertTrue(self.access.host_allowed('alice',12))
         self.assertFalse(self.access.host_allowed('alice',13))
 
+    def test_hidden_node_leaves_every_subscription_and_returns(self):
+        with self.store.connection(write=True) as db:
+            db.execute("INSERT INTO fleet_managed(id,protocol,name,domain,port,active) VALUES('n1','hysteria2','One','one.invalid',443,1)")
+            db.execute("INSERT INTO fleet_managed(id,protocol,name,domain,port,active) VALUES('n2','hysteria2','Two','two.invalid',443,1)")
+            db.execute("INSERT INTO fleet_host_nodes VALUES(12,'xray:2')")
+            db.execute("INSERT INTO fleet_host_nodes VALUES(13,'xray:3')")
+        # All-node users and selected-node users lose the hidden node's links.
+        self.access.set_subscription_visible('n1',False)
+        self.access.set_subscription_visible('xray:2',False)
+        self.assertEqual(self.access.hidden(),{'n1','xray:2'})
+        links=self.registry.links('test-uuid')
+        self.assertEqual(len(links),1);self.assertIn('two.invalid',links[0])
+        self.assertFalse(self.access.host_allowed('alice',12))
+        self.assertTrue(self.access.host_allowed('alice',13))
+        self.access.save(1,[],['n1','xray:2'])
+        self.assertEqual(self.registry.links('test-uuid'),[])
+        self.assertFalse(self.access.host_allowed('alice',12))
+        # Hiding withholds subscriptions only; node access itself is unchanged.
+        self.assertTrue(self.access.allows(1,'n1'))
+        self.access.set_subscription_visible('n1',True);self.access.set_subscription_visible('xray:2',True)
+        self.assertEqual(self.access.hidden(),set())
+        self.assertEqual(len(self.registry.links('test-uuid')),1)
+        self.assertTrue(self.access.host_allowed('alice',12))
+
+    def test_tunnelled_direct_probe_event_explains_working_entry(self):
+        with self.store.connection(write=True) as db:
+            db.execute("INSERT INTO fleet_events(node,code,severity,first_at,last_at,occurrences) VALUES('xray:3','client_unreachable','error',1,2,4)")
+        healthy={'id':'xray:3','state':'degraded','tunnel_access':{'active':True,'fresh':True,'vpn_passed':True}}
+        event=next(e for e in self.ops.events(nodes=[healthy]) if e['code']=='client_unreachable')
+        self.assertEqual(event['severity'],'warning');self.assertIn('маршрут работает',event['message'])
+        failing={'id':'xray:3','state':'degraded','tunnel_access':{'active':True,'fresh':True,'vpn_passed':False}}
+        event=next(e for e in self.ops.events(nodes=[failing]) if e['code']=='client_unreachable')
+        self.assertEqual(event['severity'],'error');self.assertIn('требует проверки',event['message'])
+
     def test_tag_report_totals_and_unmatched_tag(self):
         self.access.save(1,['team'],None)
         self.store.ingest('n1',test_accounting.AccountingTests.batch(self))

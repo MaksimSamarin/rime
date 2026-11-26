@@ -31,8 +31,9 @@ class Registry:
             external=db.execute('SELECT * FROM fleet_external_links ORDER BY position,node').fetchall()
             if current:
                 user=self.store.users(db).get(str(auth))
-                rows=[r for r in rows if user and current.allows(user['id'],r['id'],db)]
-                external=[r for r in external if user and current.allows(user['id'],r['node'],db)]
+                hidden=current.hidden(db)
+                rows=[r for r in rows if user and r['id'] not in hidden and current.allows(user['id'],r['id'],db)]
+                external=[r for r in external if user and r['node'] not in hidden and current.allows(user['id'],r['node'],db)]
         external_nodes={row['node'] for row in external}
         from .relay_routes import current as relays
         links = [(r['node'],r['prefix']+quote(str(auth),safe='')+r['suffix']) for r in external]
