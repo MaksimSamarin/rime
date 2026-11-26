@@ -166,6 +166,7 @@ class Worker:
             if current.get('id') == self.job['id']:
                 os.unlink('request.json', dir_fd=directory)
                 os.fsync(directory)
+        self.clear_cancel()
 
     def write_public(self, name, value):
         directory = self.public_directory()
@@ -184,6 +185,7 @@ class Worker:
     def status(self, phase, **fields):
         value = {
             'id': self.job['id'], 'version': self.job['tag'].removeprefix('v'),
+            **({'operation': self.job['operation']} if self.job.get('operation') else {}),
             'phase': phase, 'started_at': self.job['requested_at'], 'updated_at': time.time(), **fields,
         }
         if phase in {'succeeded', 'rolled_back', 'failed'}:
@@ -220,6 +222,53 @@ class Worker:
             return None
         return int(match.group(1))
 
+    def cancel_requested(self):
+        try:
+            value = self.read_public('cancel.json')
+        except (OSError, ValueError, UpdateError):
+            return False
+        return isinstance(value, dict) and value.get('id') == self.job['id']
+
+    def check_cancel(self):
+        """Stop before the backup starts when the panel queued a cancel request for this job."""
+        if self.cancel_requested():
+            raise UpdateError('update_cancelled')
+
+    def clear_cancel(self, stale_only=False):
+        directory = self.public_directory()
+        try:
+            try:
+                descriptor = os.open('cancel.json', os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
+            except FileNotFoundError:
+                return
+            with os.fdopen(descriptor, 'rb') as source:
+                raw = source.read(4097)
+            try:
+                value = json.loads(raw)
+            except ValueError:
+                value = {}
+            if not stale_only or not isinstance(value, dict) or value.get('id') != self.job['id']:
+                os.unlink('cancel.json', dir_fd=directory)
+        finally:
+            os.close(directory)
+
+    def publish_rollback(self):
+        """Offer the image this job replaced, when the worker would accept the rollback right now."""
+        directory = self.public_directory()
+        try:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink('rollback.json', dir_fd=directory)
+        finally:
+            os.close(directory)
+        try:
+            target = self.manual_release(self.job['id'])
+        except (OSError, ValueError, KeyError, UpdateError):
+            return None
+        offer = {'parent': self.job['id'], 'version': target['version'],
+                 'from': self.job['tag'].removeprefix('v'), 'published_at': time.time()}
+        self.write_public('rollback.json', offer)
+        return offer
+
     def fetch(self, artifact, path):
         """Download the release archive and verify it, resuming after dropped connections.
 
@@ -246,7 +295,8 @@ class Worker:
                             digest = hashlib.sha256()
                             size = before = 0
                         if offset == size:
-                            while block := response.read(1024 * 1024):
+                            while block := response.read(256 * 1024):
+                                self.check_cancel()
                                 size += len(block)
                                 if size > expected:
                                     raise UpdateError('release_checksum_mismatch')
@@ -265,7 +315,13 @@ class Worker:
                     raise UpdateError('release_unavailable')
                 retries += 1
                 self.status('downloading', progress=round(size / expected * 100), retries=retries)
-                time.sleep(min(delay * 2 ** max(failures - 1, 0), 60))
+                pause = time.monotonic() + min(delay * 2 ** max(failures - 1, 0), 60)
+                while True:
+                    self.check_cancel()
+                    left = pause - time.monotonic()
+                    if left <= 0:
+                        break
+                    time.sleep(min(left, 1))
         if size != expected or digest.hexdigest() != artifact['sha256']:
             raise UpdateError('release_checksum_mismatch')
 
@@ -723,10 +779,13 @@ assert key(NEW)>key(current)
                 self.finish_request()
                 return
             try:
+                self.clear_cancel(stale_only=True)
+                self.check_cancel()
                 self.status('checking')
                 self.ensure_idle()
                 manual=self.job.get('operation')=='rollback'
                 release = self.manual_release(self.job.get('parent','')) if manual else self.catalog.by_tag(self.job['tag'])
+                self.check_cancel()
                 if not manual and (release['id'] != self.job.get('release_id') or release['manifest_sha256'] != self.job.get('manifest_sha256')):
                     raise UpdateError('release_changed')
                 installed = self.private / 'installed-version.json'
@@ -738,8 +797,14 @@ assert key(NEW)>key(current)
                     self.status('downloading', progress=0)
                     release['runtime_image_id'] = self.download(release)
                     (self.folder/'candidate.json').write_text(json.dumps({'image':release['runtime_image_id']}))
+                # Last point to stop: install() starts with the backup and the container swap.
+                self.check_cancel()
                 self.install(release)
                 installed.write_text(json.dumps({'version': release['version']}))
+                try:
+                    self.publish_rollback()
+                except (OSError, ValueError):
+                    pass
                 try:
                     self.prune()
                 except (OSError, ValueError):

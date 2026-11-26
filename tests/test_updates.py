@@ -95,6 +95,70 @@ class UpdateQueueTests(unittest.TestCase):
             self.updates.enqueue('0.2.0')
 
 
+class UpdateControlTests(UpdateQueueTests):
+    """Stop and rollback requests the panel queues for the host worker."""
+
+    def job(self, phase, **fields):
+        value = {'id': 'a' * 32, 'version': '0.3.1', 'phase': phase, 'updated_at': time.time(), **fields}
+        (self.directory / 'status.json').write_text(json.dumps(value))
+        return value
+
+    def test_cancel_is_queued_only_before_the_backup(self):
+        for phase in ['queued', 'checking', 'downloading']:
+            with self.subTest(phase=phase):
+                self.job(phase)
+                (self.directory / 'cancel.json').unlink(missing_ok=True)
+                self.assertTrue(self.updates.status()['cancellable'])
+                status = self.updates.cancel()
+                self.assertEqual(json.loads((self.directory / 'cancel.json').read_text())['id'], 'a' * 32)
+                self.assertTrue(status['cancel_requested'])
+                self.assertFalse(status['cancellable'])
+        for phase in ['backup', 'installing', 'verifying', 'rollback', 'succeeded']:
+            with self.subTest(phase=phase):
+                self.job(phase)
+                (self.directory / 'cancel.json').unlink(missing_ok=True)
+                with self.assertRaises(UpdateError) as context:
+                    self.updates.cancel()
+                self.assertEqual(context.exception.code, 'update_not_cancellable')
+                self.assertFalse((self.directory / 'cancel.json').exists())
+
+    def offer(self, **fields):
+        value = {'parent': 'b' * 32, 'version': '0.2.9', 'from': '0.3.0', 'published_at': time.time(), **fields}
+        (self.directory / 'rollback.json').write_text(json.dumps(value))
+
+    def test_rollback_offer_applies_only_to_the_running_version(self):
+        self.assertIsNone(self.updates.status()['rollback'])
+        self.offer()
+        self.assertEqual(self.updates.status()['rollback'], {'version': '0.2.9'})
+        self.offer(**{'from': '0.2.8'})
+        self.assertIsNone(self.updates.status()['rollback'])
+        self.offer(parent='short')
+        self.assertIsNone(self.updates.status()['rollback'])
+
+    def test_rollback_request_needs_confirmation_and_names_the_successful_job(self):
+        self.offer()
+        with self.assertRaises(UpdateError) as context:
+            self.updates.enqueue_rollback('yes')
+        self.assertEqual(context.exception.code, 'rollback_confirmation_required')
+        status = self.updates.enqueue_rollback('rollback')
+        request = json.loads((self.directory / 'request.json').read_text())
+        self.assertEqual({key: request[key] for key in ['operation', 'parent', 'tag']},
+                         {'operation': 'rollback', 'parent': 'b' * 32, 'tag': 'v0.2.9'})
+        self.assertEqual(status['job']['operation'], 'rollback')
+        self.assertEqual(status['job']['phase'], 'queued')
+
+    def test_rollback_is_refused_without_offer_or_during_a_job(self):
+        with self.assertRaises(UpdateError) as context:
+            self.updates.enqueue_rollback('rollback')
+        self.assertEqual(context.exception.code, 'rollback_not_available')
+        self.offer()
+        self.job('downloading')
+        with self.assertRaises(UpdateError) as context:
+            self.updates.enqueue_rollback('rollback')
+        self.assertEqual(context.exception.code, 'update_running')
+        self.assertFalse((self.directory / 'request.json').exists())
+
+
 class ReleaseVerificationTests(unittest.TestCase):
     def setUp(self):
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -352,6 +416,67 @@ class WorkerDownloadTests(unittest.TestCase):
         with self.assertRaises(UpdateError) as context:
             worker.fetch(self.artifact, self.path)
         self.assertEqual(context.exception.code, 'release_checksum_mismatch')
+
+    def job_worker(self, answers=()):
+        worker, catalog = self.worker(list(answers))
+        worker.public.mkdir(exist_ok=True)
+        worker.job = {'id': 'c' * 32, 'tag': 'v0.9.5', 'requested_at': time.time()}
+        return worker, catalog
+
+    def test_cancel_request_stops_the_download_of_this_job(self):
+        class CancellingResponse(Response):
+            def __init__(self, body, public):
+                super().__init__(body)
+                self.public = public
+
+            def read(self, amount):
+                if self.position:
+                    (self.public / 'cancel.json').write_text(json.dumps({'id': 'c' * 32}))
+                return super().read(amount)
+        worker, catalog = self.job_worker()
+        catalog.answers = [CancellingResponse(self.data, worker.public)]
+        with self.assertRaises(UpdateError) as context:
+            worker.fetch(self.artifact, self.path)
+        self.assertEqual(context.exception.code, 'update_cancelled')
+        self.assertLess(self.path.stat().st_size, len(self.data))
+
+    def test_cancel_for_another_job_is_ignored_and_cleared(self):
+        worker, _ = self.job_worker([Response(self.data)])
+        (worker.public / 'cancel.json').write_text(json.dumps({'id': 'd' * 32}))
+        worker.fetch(self.artifact, self.path)
+        self.assertEqual(self.path.read_bytes(), self.data)
+        worker.clear_cancel(stale_only=True)
+        self.assertFalse((worker.public / 'cancel.json').exists())
+        (worker.public / 'cancel.json').write_text(json.dumps({'id': 'c' * 32}))
+        worker.clear_cancel(stale_only=True)
+        self.assertTrue((worker.public / 'cancel.json').exists())
+
+    def test_successful_job_offers_the_version_it_replaced(self):
+        worker, _ = self.job_worker()
+        with patch.object(worker, 'manual_release', return_value={'version': '0.9.4'}) as release:
+            offer = worker.publish_rollback()
+        release.assert_called_once_with('c' * 32)
+        stored = json.loads((worker.public / 'rollback.json').read_text())
+        self.assertEqual({key: stored[key] for key in ['parent', 'version', 'from']},
+                         {'parent': 'c' * 32, 'version': '0.9.4', 'from': '0.9.5'})
+        self.assertEqual(offer['version'], '0.9.4')
+        with patch.object(worker, 'manual_release', side_effect=UpdateError('rollback_schema_incompatible')):
+            self.assertIsNone(worker.publish_rollback())
+        self.assertFalse((worker.public / 'rollback.json').exists())
+
+    def test_cancel_before_checking_ends_the_job_without_contacting_github(self):
+        worker, catalog = self.job_worker()
+        job = worker.job
+        (worker.public / 'request.json').write_text(json.dumps({**job, 'release_id': '7', 'manifest_sha256': 'a' * 64}))
+        (worker.public / 'cancel.json').write_text(json.dumps({'id': job['id']}))
+        (worker.public / 'status.json').write_text(json.dumps({'id': job['id'], 'version': '0.9.5', 'phase': 'queued'}))
+        del worker.status
+        worker.run()
+        status = json.loads((worker.public / 'status.json').read_text())
+        self.assertEqual((status['phase'], status['error']), ('failed', 'update_cancelled'))
+        self.assertEqual(catalog.ranges, [])
+        self.assertFalse((worker.public / 'request.json').exists())
+        self.assertFalse((worker.public / 'cancel.json').exists())
 
     def test_range_header_survives_the_github_redirect(self):
         catalog = ReleaseCatalog()

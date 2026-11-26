@@ -501,7 +501,8 @@
         try{await api('/api/fleet/nodes/'+encodeURIComponent(n.id)+'/subscription',{method:'PUT',json:{visible:!visible}});await window.Rime.refresh();await nodeDetail();}
         catch(error){status.textContent=error.message;toggle.disabled=false;}
       });
-      if(visible)toggle.classList.add('danger');
+      // A plain quiet button reads as text in the settings list; this one changes every subscription.
+      toggle.className=visible?'secondary danger':'secondary';
       subscription.append(toggle,status);
     }
     // Addresses already bound to another node belong to that node's card.

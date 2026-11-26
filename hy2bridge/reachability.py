@@ -70,7 +70,13 @@ class Reachability:
                 (node,probe,now,value['checked_at'],json.dumps(data)))
             # One open incident per node; repeated failures update its counter.
             incident=db.execute("SELECT id FROM fleet_events WHERE node=? AND code='client_unreachable' AND resolved_at IS NULL",(node,)).fetchone()
-            if value['passed'] and incident:
+            # Clients of a node behind an entry server get the entry address. The per-minute route
+            # check through the entry owns that node's client events (relay_client_unreachable);
+            # the direct-address probe stays visible in the card but no longer raises an incident.
+            tunnelled=db.execute("SELECT 1 FROM sqlite_master WHERE name='fleet_tunnels'").fetchone() is not None and                 db.execute("SELECT 1 FROM fleet_tunnels WHERE node=? AND state='active'",(node,)).fetchone() is not None
+            if tunnelled:
+                if incident:db.execute('UPDATE fleet_events SET resolved_at=?,last_at=? WHERE id=?',(now,now,incident['id']))
+            elif value['passed'] and incident:
                 db.execute('UPDATE fleet_events SET resolved_at=?,last_at=? WHERE id=?',(now,now,incident['id']))
             elif not value['passed'] and value['stage'] not in ('configuration','route'):
                 if incident:db.execute('UPDATE fleet_events SET last_at=?,occurrences=occurrences+1 WHERE id=?',(now,incident['id']))
