@@ -87,7 +87,8 @@
     progress.hidden = job.phase !== "downloading";
     progress.value = job.progress || 0;
     find("update-progress").textContent = {
-      queued: "Ожидание службы обновления…", checking: "Проверка релиза…", downloading: `Загружено ${job.progress || 0}%`,
+      queued: "Ожидание службы обновления…", checking: "Проверка релиза…",
+      downloading: `Загружено ${job.progress || 0}%` + (job.retries ? ` · связь с GitHub прерывалась, загрузка продолжена (${job.retries})` : ""),
       backup: "Сохранение базы и конфигурации…", installing: "Панель перезапускается…", verifying: "Проверка запуска новой версии…", rollback: "Восстановление предыдущей версии…"
     }[job.phase] || "";
     if (job.error) showError(job.error);
@@ -100,8 +101,12 @@
     try {
       render(await api("/api/system/updates"));
     } catch (error) {
-      if (running.has(status?.job?.phase)) {
-        find("update-progress").textContent = "Ожидание панели после перезапуска…";
+      const phase = status?.job?.phase;
+      if (running.has(phase)) {
+        // Only installation restarts the panel; earlier phases run on the host while the panel keeps serving.
+        find("update-progress").textContent = ["installing", "verifying", "rollback"].includes(phase) ?
+          "Ожидание панели после перезапуска…" :
+          "Нет ответа от панели. Обновление продолжается на сервере, запрос повторяется…";
         if (dialog.open) timer = setTimeout(load, 2500);
       } else showError(error);
     }

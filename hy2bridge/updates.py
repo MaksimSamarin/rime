@@ -11,7 +11,7 @@ import uuid
 from update_runtime.releases import ReleaseCatalog, UpdateError, version_key
 
 ACTIVE_PHASES = {'queued', 'checking', 'downloading', 'backup', 'installing', 'verifying', 'rollback'}
-JOB_FIELDS = {'id', 'version', 'phase', 'error', 'started_at', 'updated_at', 'completed_at', 'progress'}
+JOB_FIELDS = {'id', 'version', 'phase', 'error', 'started_at', 'updated_at', 'completed_at', 'progress', 'retries'}
 
 
 class Updates:

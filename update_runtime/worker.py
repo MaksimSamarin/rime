@@ -209,24 +209,73 @@ class Worker:
             if 'fleet_node_transfers' in tables and source.execute("SELECT 1 FROM fleet_node_transfers WHERE state='switched' LIMIT 1").fetchone():
                 raise UpdateError('node_operation_running')
 
+    @staticmethod
+    def resume_offset(response, expected):
+        """First byte of the body: 0 for a full answer, the range start for 206, None if unusable."""
+        code = getattr(response, 'status', None) or response.getcode()
+        if code == 200:
+            return 0
+        match = re.fullmatch(r'bytes (\d+)-(\d+)/(\d+)', (response.headers.get('Content-Range') or '').strip())
+        if code != 206 or not match or int(match.group(3)) != expected:
+            return None
+        return int(match.group(1))
+
+    def fetch(self, artifact, path):
+        """Download the release archive and verify it, resuming after dropped connections.
+
+        Slow routes to GitHub close long transfers before the end. Each retry asks for the
+        remaining bytes with Range and keeps hashing in file order, so a resumed archive is
+        verified exactly like one fetched in a single response.
+        """
+        expected = artifact['size']
+        limit = int(self.config.get('download_retries', 8))
+        delay = float(self.config.get('download_retry_delay', 5))
+        digest = hashlib.sha256()
+        size = failures = retries = 0
+        with path.open('wb') as target:
+            while size < expected:
+                before = size
+                try:
+                    headers = {'Range': 'bytes=%d-' % size} if size else None
+                    with self.catalog.open(artifact['url'], headers) as response:
+                        offset = self.resume_offset(response, expected) if size else 0
+                        if offset == 0 and size:
+                            # The server ignored the range and sent the whole file again.
+                            target.seek(0)
+                            target.truncate()
+                            digest = hashlib.sha256()
+                            size = before = 0
+                        if offset == size:
+                            while block := response.read(1024 * 1024):
+                                size += len(block)
+                                if size > expected:
+                                    raise UpdateError('release_checksum_mismatch')
+                                digest.update(block)
+                                target.write(block)
+                                self.status('downloading', progress=round(size / expected * 100), retries=retries)
+                except UpdateError as error:
+                    if error.code != 'release_unavailable':
+                        raise
+                except (OSError, http.client.HTTPException):
+                    pass
+                if size >= expected:
+                    break
+                failures = 0 if size > before else failures + 1
+                if failures > limit:
+                    raise UpdateError('release_unavailable')
+                retries += 1
+                self.status('downloading', progress=round(size / expected * 100), retries=retries)
+                time.sleep(min(delay * 2 ** max(failures - 1, 0), 60))
+        if size != expected or digest.hexdigest() != artifact['sha256']:
+            raise UpdateError('release_checksum_mismatch')
+
     def download(self, release):
         artifact = release['artifact']
         path = self.folder / 'image.tar.gz'
         needed = artifact['size']
         if available_for_update(self.private,self.config) < needed:
             raise UpdateError('insufficient_disk_space')
-        digest = hashlib.sha256()
-        size = 0
-        with self.catalog.open(artifact['url']) as response, path.open('wb') as target:
-            while block := response.read(1024 * 1024):
-                size += len(block)
-                if size > artifact['size']:
-                    raise UpdateError('release_checksum_mismatch')
-                digest.update(block)
-                target.write(block)
-                self.status('downloading', progress=round(size / artifact['size'] * 100))
-        if size != artifact['size'] or digest.hexdigest() != artifact['sha256']:
-            raise UpdateError('release_checksum_mismatch')
+        self.fetch(artifact, path)
         identity = archive_identity(path)
         repository = self.config.get('lab_image_prefix') if self.config.get('lab') else 'rime'
         reference = repository + ':' + release['version']
